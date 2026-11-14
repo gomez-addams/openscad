@@ -62,7 +62,7 @@ static int CreateBucket( struct BucketAlloc* ba )
 	unsigned char* it;
 
 	// Allocate memory for the bucket
-	size = sizeof(Bucket) + ba->itemSize * ba->bucketSize;
+	size = sizeof(Bucket) + (size_t)(ba->itemSize) * ba->bucketSize;
 	bucket = (Bucket*)ba->alloc->memalloc( ba->alloc->userData, size );
 	if ( !bucket )
 		return 0;
@@ -165,7 +165,7 @@ void bucketFree( struct BucketAlloc *ba, void *ptr )
 	}
 	else
 	{
-		printf("ERROR! pointer 0x%p does not belong to allocator '%s'\n", ba->name);
+		printf("ERROR! pointer 0x%p does not belong to allocator '%s'\n", ptr, ba->name);
 	}
 #else
 	// Add the node in front of the free list.

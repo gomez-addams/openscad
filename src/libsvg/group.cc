@@ -22,37 +22,29 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include <stdlib.h>
-#include <iostream>
+#include "libsvg/group.h"
 
-#include "group.h"
+#include <cstdlib>
+#include <iostream>
+#include <sstream>
+#include <string>
+
+#include "libsvg/shape.h"
 
 namespace libsvg {
 
 const std::string group::name("g");
 
-group::group()
+void group::set_attrs(attr_map_t& attrs, void *context)
 {
+  shape::set_attrs(attrs, context);
 }
 
-group::~group()
+const std::string group::dump() const
 {
+  std::stringstream s;
+  s << get_name() << ": x = " << this->x << ": y = " << this->y;
+  return s.str();
 }
 
-void
-group::set_attrs(attr_map_t& attrs)
-{
-	shape::set_attrs(attrs);
-}
-
-const std::string
-group::dump() const
-{
-	std::stringstream s;
-	s << get_name()
-		<< ": x = " << this->x
-		<< ": y = " << this->y;
-	return s.str();
-}
-
-}
+}  // namespace libsvg

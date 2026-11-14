@@ -1,0 +1,828 @@
+#include "HTTPClient.h"
+#include <string>
+#include "core/Settings.h"
+#include "platform/PlatformUtils.h"
+#include "utils/printutils.h"
+
+#ifndef __EMSCRIPTEN__
+
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+#include <boost/beast/ssl.hpp>
+#include <boost/beast/version.hpp>
+#include <boost/asio/strand.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ssl/error.hpp>
+#include <boost/asio/ssl/stream.hpp>
+#include <boost/lexical_cast.hpp>
+#include <thread>
+#include <mutex>
+#include <set>
+#include <cctype>
+#include <algorithm>
+#include <chrono>
+#include <utility>
+#include <cstdlib>
+#include <filesystem>
+#include <system_error>
+#include <array>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <wincrypt.h>
+#endif
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+
+namespace {
+
+int validatePort(const std::string& port)
+{
+  try {
+    int value = boost::lexical_cast<int>(port);
+    if (value >= 1 && value <= 65535) {
+      return value;
+    }
+    return 0;
+  } catch (const boost::bad_lexical_cast&) {
+    return 0;
+  }
+}
+
+std::string makeHostHeader(const ParsedURL& parsed)
+{
+  std::string host;
+
+  if (parsed.ipv6 && parsed.host.find(':') != std::string::npos) {
+    host = "[" + parsed.host + "]";
+  } else {
+    host = parsed.host;
+  }
+
+  if (parsed.scheme == "http" && parsed.port == 80) {
+    return host;
+  }
+
+  if (parsed.scheme == "https" && parsed.port == 443) {
+    return host;
+  }
+
+  host += ":" + std::to_string(parsed.port);
+  return host;
+}
+
+#ifdef _WIN32
+
+void load_system_certificates(boost::asio::ssl::context& ctx)
+{
+  HCERTSTORE hStore = CertOpenSystemStoreA(0, "ROOT");
+  if (!hStore) {
+    return;
+  }
+
+  X509_STORE *store = SSL_CTX_get_cert_store(ctx.native_handle());
+  if (!store) {
+    CertCloseStore(hStore, 0);
+    return;
+  }
+
+  PCCERT_CONTEXT pContext = nullptr;
+  while ((pContext = CertEnumCertificatesInStore(hStore, pContext)) != nullptr) {
+    const unsigned char *pbCertEncoded = pContext->pbCertEncoded;
+    X509 *x509 = d2i_X509(nullptr, &pbCertEncoded, pContext->cbCertEncoded);
+    if (x509) {
+      X509_STORE_add_cert(store, x509);
+      X509_free(x509);
+    }
+  }
+  CertCloseStore(hStore, 0);
+}
+
+#else  // _WIN32
+
+// Well-known CA bundle locations on common Unix systems.
+// Some context: https://curl.se/mail/lib-2022-05/0038.html
+// https://github.com/curl/curl/blob/41efc221/acinclude.m4#L1009-L1019
+const std::array<std::string, 7> caBundleFiles = {
+  "/etc/ssl/certs/ca-certificates.crt",  // Debian, Ubuntu and derivatives
+  "/etc/pki/tls/certs/ca-bundle.crt",    // Fedora, RHEL, CentOS
+  "/usr/share/ssl/certs/ca-bundle.crt",  // old(er) RedHat
+  "/etc/ssl/ca-bundle.pem",              // openSUSE
+  "/etc/pki/tls/cacert.pem",             // openSUSE (older)
+  "/etc/ca-bundle.pem",                  // SUSE
+  "/etc/ssl/cert.pem",                   // Alpine, FreeBSD
+};
+
+const std::array<std::string, 3> caBundleDirs = {
+  "/etc/ssl/certs",         // Debian, Ubuntu, Arch
+  "/etc/pki/tls/certs",     // Fedora, RHEL, CentOS
+  "/etc/ssl/certificates",  // SUSE
+};
+
+// Whether the default verification paths (SSL_CERT_FILE/SSL_CERT_DIR, or the
+// OpenSSL compiled-in equivalents) point to existing files or directories.
+bool check_default_cert_path()
+{
+  const char *file = std::getenv(X509_get_default_cert_file_env());
+  if (!file) {
+    file = X509_get_default_cert_file();
+  }
+  const char *dir = std::getenv(X509_get_default_cert_dir_env());
+  if (!dir) {
+    dir = X509_get_default_cert_dir();
+  }
+  auto pathExists = [](const char *path) {
+    std::error_code ec;
+    return path && std::filesystem::exists(path, ec);
+  };
+  return pathExists(file) || pathExists(dir);
+}
+
+void load_system_certificates(boost::asio::ssl::context& ctx)
+{
+  boost::system::error_code ec;
+  ctx.set_default_verify_paths(ec);
+  if (ec) {
+    LOG("Could not load default SSL verification paths: %1$s", ec.message());
+  }
+
+  // In some environments, e.g. AppImage the default paths compiled
+  // into the bundled OpenSSL may not exist on the host system, in
+  // which case no CA certificates have been loaded. Fall back to
+  // searching some well-known system CA bundle locations in case the
+  // default cert path does not exist.
+  if (!ec && check_default_cert_path()) {
+    return;
+  }
+
+  for (const auto& path : caBundleFiles) {
+    ec.clear();
+    ctx.load_verify_file(path, ec);
+    if (!ec) {
+      LOG("Loaded system CA certificates from '%1$s'", path);
+      return;
+    }
+  }
+  for (const auto& path : caBundleDirs) {
+    ec.clear();
+    ctx.add_verify_path(path, ec);
+    if (!ec) {
+      LOG("Loaded system CA certificates from '%1$s'", path);
+      return;
+    }
+  }
+
+  LOG(message_group::Warning,
+      "Could not load system CA certificates. HTTPS connections cannot be verified.");
+}
+
+#endif  // _WIN32
+
+}  // namespace
+
+// Revisit when boost 1.81 is minimum, see https://www.boost.org/library/1.81.0/url/
+ParsedURL parseURL(const std::string& url)
+{
+  ParsedURL parsed;
+  size_t scheme_end = url.find("://");
+  std::string rest;
+
+  if (scheme_end != std::string::npos) {
+    parsed.scheme = url.substr(0, scheme_end);
+    std::transform(parsed.scheme.begin(), parsed.scheme.end(), parsed.scheme.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+
+    if (parsed.scheme != "http" && parsed.scheme != "https") {
+      parsed.error = "Unsupported URL scheme: " + parsed.scheme;
+      return parsed;
+    }
+    rest = url.substr(scheme_end + 3);
+  } else {
+    parsed.scheme = "https";
+    rest = url;
+  }
+
+  size_t path_start = rest.find('/');
+  std::string host_port;
+  if (path_start == std::string::npos) {
+    host_port = rest;
+    parsed.target = "/";
+  } else {
+    host_port = rest.substr(0, path_start);
+    parsed.target = rest.substr(path_start);
+  }
+
+  // userinfo is separated from the host by the last '@' in the authority
+  size_t at_pos = host_port.rfind('@');
+  if (at_pos != std::string::npos) {
+    parsed.userinfo = host_port.substr(0, at_pos);
+    host_port = host_port.substr(at_pos + 1);
+  }
+
+  std::string port;
+  if (!host_port.empty() && host_port.front() == '[') {
+    // Bracketed IPv6 literal, e.g. [::1] or [2001:db8::1]:8080
+    parsed.ipv6 = true;
+    size_t close = host_port.find(']');
+    if (close == std::string::npos) {
+      parsed.error = "Invalid URL: missing ']' after IPv6 address";
+      return parsed;
+    }
+    std::string host = host_port.substr(1, close - 1);
+    if (host.empty()) {
+      parsed.error = "Invalid URL: host is empty";
+      return parsed;
+    }
+    size_t after = close + 1;
+    if (after < host_port.size()) {
+      if (host_port[after] != ':') {
+        parsed.error = "Invalid URL: invalid character after IPv6 address";
+        return parsed;
+      }
+      port = host_port.substr(after + 1);
+    }
+    parsed.host = std::move(host);
+    if (port.empty()) {
+      port = (parsed.scheme == "https") ? "443" : "80";
+    }
+  } else {
+    size_t port_start = host_port.find(':');
+    if (port_start == std::string::npos) {
+      parsed.host = host_port;
+      port = (parsed.scheme == "https") ? "443" : "80";
+    } else {
+      parsed.host = host_port.substr(0, port_start);
+      port = host_port.substr(port_start + 1);
+    }
+  }
+
+  if (parsed.host.empty()) {
+    parsed.error = "Invalid URL: host is empty";
+    return parsed;
+  }
+
+  parsed.port = validatePort(port);
+  if (parsed.port == 0) {
+    parsed.error = "Invalid URL: invalid port '" + port + "'";
+    return parsed;
+  }
+
+  parsed.host_header = makeHostHeader(parsed);
+
+  return parsed;
+}
+
+// A session representing a single HTTP/HTTPS request/response lifetime
+class CancelableSession
+{
+public:
+  virtual ~CancelableSession() = default;
+  virtual void cancel() = 0;
+};
+
+class SessionRegistry
+{
+public:
+  virtual ~SessionRegistry() = default;
+  virtual void register_session(std::shared_ptr<CancelableSession> session) = 0;
+  virtual void unregister_session(std::shared_ptr<CancelableSession> session) = 0;
+};
+
+template <bool IsSSL>
+class Session : public CancelableSession, public std::enable_shared_from_this<Session<IsSSL>>
+{
+public:
+  using StreamType = std::conditional_t<IsSSL, boost::asio::ssl::stream<boost::beast::tcp_stream>,
+                                        boost::beast::tcp_stream>;
+
+  Session(boost::asio::io_context& io_ctx, SessionRegistry *registry,
+          boost::asio::ssl::context *ssl_ctx,  // null if !IsSSL
+          std::string host, int port, std::string target,
+          boost::beast::http::request<boost::beast::http::string_body> req,
+          HTTPClient::ResponseCallback on_response, HTTPClient::ChunkCallback on_chunk,
+          HTTPClient::ErrorCallback on_error, HTTPClient::CompleteCallback on_complete)
+    : registry_(registry),
+      resolver_(boost::asio::make_strand(io_ctx)),
+      stream_(create_stream(io_ctx, ssl_ctx)),
+      host_(std::move(host)),
+      port_(port),
+      target_(std::move(target)),
+      req_(std::move(req)),
+      on_response_(std::move(on_response)),
+      on_chunk_(std::move(on_chunk)),
+      on_error_(std::move(on_error)),
+      on_complete_(std::move(on_complete)),
+      body_offset_(0)
+  {
+  }
+
+  void run()
+  {
+    if (registry_) {
+      registry_->register_session(this->shared_from_this());
+    }
+
+    if constexpr (IsSSL) {
+      // SNI is only defined for hostnames (RFC 6066); omit it for IP literals.
+      boost::system::error_code ip_ec;
+      boost::asio::ip::make_address(host_, ip_ec);
+      if (ip_ec) {
+        if (!SSL_set_tlsext_host_name(stream_.native_handle(), host_.c_str())) {
+          boost::beast::error_code ec{static_cast<int>(::ERR_get_error()),
+                                      boost::asio::error::get_ssl_category()};
+          fail(ec, "SNI set_host_name");
+          return;
+        }
+      }
+    }
+
+    resolver_.async_resolve(
+      host_, std::to_string(port_),
+      boost::beast::bind_front_handler(&Session::on_resolve, this->shared_from_this()));
+  }
+
+  void cancel() override
+  {
+    auto self = this->shared_from_this();
+    boost::asio::post(resolver_.get_executor(),
+                      [this, self]() { boost::beast::get_lowest_layer(stream_).close(); });
+  }
+
+private:
+  SessionRegistry *registry_;
+  boost::asio::ip::tcp::resolver resolver_;
+  StreamType stream_;
+  std::string host_;
+  int port_;
+  std::string target_;
+  boost::beast::http::request<boost::beast::http::string_body> req_;
+  boost::beast::flat_buffer buffer_;
+  boost::beast::http::response_parser<boost::beast::http::string_body> parser_;
+
+  HTTPClient::ResponseCallback on_response_;
+  HTTPClient::ChunkCallback on_chunk_;
+  HTTPClient::ErrorCallback on_error_;
+  HTTPClient::CompleteCallback on_complete_;
+  std::size_t body_offset_;
+
+  static StreamType create_stream(boost::asio::io_context& io_ctx, boost::asio::ssl::context *ssl_ctx)
+  {
+    if constexpr (IsSSL) {
+      return StreamType(boost::asio::make_strand(io_ctx), *ssl_ctx);
+    } else {
+      return StreamType(boost::asio::make_strand(io_ctx));
+    }
+  }
+
+  void remove_self()
+  {
+    if (registry_) {
+      registry_->unregister_session(this->shared_from_this());
+    }
+  }
+
+  void on_resolve(boost::beast::error_code ec, boost::asio::ip::tcp::resolver::results_type results)
+  {
+    if (ec) {
+      return fail(ec, "resolve");
+    }
+
+    boost::beast::get_lowest_layer(stream_).expires_after(std::chrono::seconds(30));
+    boost::beast::get_lowest_layer(stream_).async_connect(
+      results, boost::beast::bind_front_handler(&Session::on_connect, this->shared_from_this()));
+  }
+
+  void on_connect(boost::beast::error_code ec,
+                  boost::asio::ip::tcp::resolver::results_type::endpoint_type)
+  {
+    if (ec) {
+      return fail(ec, "connect");
+    }
+
+    if constexpr (IsSSL) {
+      boost::beast::get_lowest_layer(stream_).expires_after(std::chrono::seconds(30));
+      stream_.async_handshake(
+        boost::asio::ssl::stream_base::client,
+        boost::beast::bind_front_handler(&Session::on_handshake, this->shared_from_this()));
+    } else {
+      write_request();
+    }
+  }
+
+  void on_handshake(boost::beast::error_code ec)
+  {
+    if (ec) {
+      return fail(ec, "handshake");
+    }
+
+    write_request();
+  }
+
+  void write_request()
+  {
+    boost::beast::get_lowest_layer(stream_).expires_after(std::chrono::seconds(30));
+    boost::beast::http::async_write(
+      stream_, req_, boost::beast::bind_front_handler(&Session::on_write, this->shared_from_this()));
+  }
+
+  void on_write(boost::beast::error_code ec, std::size_t bytes_transferred)
+  {
+    boost::ignore_unused(bytes_transferred);
+
+    if (ec) {
+      return fail(ec, "write");
+    }
+
+    if (!on_chunk_) {
+      boost::beast::get_lowest_layer(stream_).expires_after(std::chrono::seconds(30));
+      boost::beast::http::async_read(
+        stream_, buffer_, parser_,
+        boost::beast::bind_front_handler(&Session::on_read, this->shared_from_this()));
+    } else {
+      boost::beast::get_lowest_layer(stream_).expires_never();
+      read_chunk();
+    }
+  }
+
+  void on_read(boost::beast::error_code ec, std::size_t bytes_transferred)
+  {
+    boost::ignore_unused(bytes_transferred);
+
+    if (ec) {
+      return fail(ec, "read");
+    }
+
+    if (on_response_) {
+      on_response_(parser_.get().result_int(), parser_.get().body());
+    }
+
+    close_connection();
+  }
+
+  void read_chunk()
+  {
+    boost::beast::http::async_read_some(
+      stream_, buffer_, parser_,
+      boost::beast::bind_front_handler(&Session::on_read_chunk, this->shared_from_this()));
+  }
+
+  void on_read_chunk(boost::beast::error_code ec, std::size_t bytes_transferred)
+  {
+    boost::ignore_unused(bytes_transferred);
+
+    if (!ec) {
+      auto& body = parser_.get().body();
+      if (body.size() > body_offset_) {
+        std::string new_data = body.substr(body_offset_);
+        body_offset_ = body.size();
+        if (on_chunk_) {
+          on_chunk_(parser_.get().result_int(), new_data);
+        }
+      }
+
+      if (parser_.is_done()) {
+        if (on_complete_) {
+          on_complete_();
+        }
+        close_connection();
+      } else {
+        read_chunk();
+      }
+    } else if (ec == boost::beast::http::error::end_of_stream) {
+      auto& body = parser_.get().body();
+      if (body.size() > body_offset_) {
+        std::string new_data = body.substr(body_offset_);
+        body_offset_ = body.size();
+        if (on_chunk_) {
+          on_chunk_(parser_.get().result_int(), new_data);
+        }
+      }
+      if (on_complete_) {
+        on_complete_();
+      }
+      close_connection();
+    } else {
+      return fail(ec, "read_chunk");
+    }
+  }
+
+  void close_connection()
+  {
+    remove_self();
+    if constexpr (IsSSL) {
+      boost::beast::get_lowest_layer(stream_).expires_after(std::chrono::seconds(5));
+      stream_.async_shutdown(
+        boost::beast::bind_front_handler(&Session::on_shutdown, this->shared_from_this()));
+    } else {
+      boost::beast::error_code ec;
+      boost::beast::get_lowest_layer(stream_).socket().shutdown(
+        boost::asio::ip::tcp::socket::shutdown_both, ec);
+      boost::beast::get_lowest_layer(stream_).close();
+    }
+  }
+
+  void on_shutdown(boost::beast::error_code ec)
+  {
+    boost::ignore_unused(ec);
+    boost::beast::get_lowest_layer(stream_).close();
+  }
+
+  void fail(boost::beast::error_code ec, const char *what)
+  {
+    remove_self();
+    if (ec == boost::asio::error::operation_aborted) {
+      return;
+    }
+
+    std::string msg = std::string(what) + ": " + ec.message();
+    if (on_error_) {
+      on_error_(msg);
+    }
+  }
+};
+
+// Private implementation structure
+class HTTPClient::Impl : public SessionRegistry
+{
+public:
+  boost::asio::io_context io_ctx;
+  boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_guard;
+  boost::asio::ssl::context ssl_ctx;
+  std::thread background_thread;
+
+  std::mutex sessions_mutex;
+  std::set<std::shared_ptr<CancelableSession>> active_sessions;
+
+  std::mutex ssl_mutex;
+  std::string applied_ca_path;
+  bool applied_skip_verify = false;
+
+  void register_session(std::shared_ptr<CancelableSession> session) override
+  {
+    std::lock_guard<std::mutex> lock(sessions_mutex);
+    active_sessions.insert(session);
+  }
+
+  void unregister_session(std::shared_ptr<CancelableSession> session) override
+  {
+    std::lock_guard<std::mutex> lock(sessions_mutex);
+    active_sessions.erase(session);
+  }
+
+  Impl()
+    : work_guard(boost::asio::make_work_guard(io_ctx)), ssl_ctx(boost::asio::ssl::context::tlsv12_client)
+  {
+    ssl_ctx.set_verify_mode(boost::asio::ssl::verify_peer);
+    load_system_certificates(ssl_ctx);
+
+    background_thread = std::thread([this]() { io_ctx.run(); });
+  }
+
+  ~Impl() override
+  {
+    cancelPendingRequests();
+    work_guard.reset();
+    io_ctx.stop();
+    if (background_thread.joinable()) {
+      background_thread.join();
+    }
+  }
+
+  void cancelPendingRequests()
+  {
+    std::vector<std::shared_ptr<CancelableSession>> to_cancel;
+    {
+      std::lock_guard<std::mutex> lock(sessions_mutex);
+      for (const auto& s : active_sessions) {
+        to_cancel.push_back(s);
+      }
+    }
+    for (const auto& s : to_cancel) {
+      s->cancel();
+    }
+  }
+
+  // Re-applies the global CA certificate / TLS verification settings to
+  // ssl_ctx. Only new connections pick up the change; in-flight sessions
+  // keep the trust settings they were created with.
+  void applyNetworkTlsSettings()
+  {
+    const auto& caPath = Settings::Settings::caCertPath.value();
+    const auto skipVerify = Settings::Settings::tlsSkipVerify.value();
+    std::lock_guard<std::mutex> lock(ssl_mutex);
+    if (skipVerify != applied_skip_verify) {
+      // Relies on the default setting of the stack is to have verification enabled,
+      // matching the default of applied_skip_verify = false.
+      ssl_ctx.set_verify_mode(skipVerify ? boost::asio::ssl::verify_none
+                                         : boost::asio::ssl::verify_peer);
+      applied_skip_verify = skipVerify;
+    }
+    if (caPath != applied_ca_path) {
+      if (!caPath.empty()) {
+        boost::system::error_code ec;
+        ssl_ctx.load_verify_file(caPath, ec);
+        if (ec) {
+          // On error, don't update the applied flag, so the next connection request
+          // will try to load the certificates again.
+          LOG("Could not load custom CA certificates from '%1$s': %2$s", caPath, ec.message());
+        } else {
+          applied_ca_path = caPath;
+        }
+      }
+    }
+  }
+
+  // Rule of 5
+  Impl(const Impl&) = delete;
+  Impl& operator=(const Impl&) = delete;
+  Impl(Impl&&) = delete;
+  Impl& operator=(Impl&&) = delete;
+};
+
+HTTPClient::HTTPClient() : impl(std::make_unique<Impl>())
+{
+}
+
+HTTPClient::~HTTPClient() = default;
+
+HTTPClient::HTTPClient(HTTPClient&&) noexcept = default;
+HTTPClient& HTTPClient::operator=(HTTPClient&&) noexcept = default;
+
+void HTTPClient::cancelPendingRequests()
+{
+  impl->cancelPendingRequests();
+}
+
+void HTTPClient::asyncGet(const std::string& url, const Headers& headers, ResponseCallback on_response,
+                          ErrorCallback on_error)
+{
+  ParsedURL parsed = parseURL(url);
+  if (!parsed.error.empty()) {
+    if (on_error) {
+      on_error(parsed.error);
+    }
+    return;
+  }
+  if (parsed.host.empty()) {
+    if (on_error) {
+      on_error("Invalid URL: host is empty");
+    }
+    return;
+  }
+
+  boost::beast::http::request<boost::beast::http::string_body> req{boost::beast::http::verb::get,
+                                                                   parsed.target, 11};
+  req.set(boost::beast::http::field::host, parsed.host_header);
+  req.set(boost::beast::http::field::user_agent, PlatformUtils::user_agent());
+  for (const auto& header : headers) {
+    req.set(header.first, header.second);
+  }
+
+  if (parsed.scheme == "https") {
+    impl->applyNetworkTlsSettings();
+    auto session = std::make_shared<Session<true>>(
+      impl->io_ctx, impl.get(), &impl->ssl_ctx, parsed.host, parsed.port, parsed.target, std::move(req),
+      std::move(on_response), nullptr, std::move(on_error), nullptr);
+    session->run();
+  } else if (parsed.scheme == "http") {
+    auto session = std::make_shared<Session<false>>(
+      impl->io_ctx, impl.get(), nullptr, parsed.host, parsed.port, parsed.target, std::move(req),
+      std::move(on_response), nullptr, std::move(on_error), nullptr);
+    session->run();
+  } else {
+    if (on_error) {
+      on_error("Unsupported URL scheme: " + parsed.scheme);
+    }
+  }
+}
+
+void HTTPClient::asyncPost(const std::string& url, const Headers& headers, const std::string& body,
+                           ResponseCallback on_response, ErrorCallback on_error)
+{
+  ParsedURL parsed = parseURL(url);
+  if (!parsed.error.empty()) {
+    if (on_error) {
+      on_error(parsed.error);
+    }
+    return;
+  }
+  if (parsed.host.empty()) {
+    if (on_error) {
+      on_error("Invalid URL: host is empty");
+    }
+    return;
+  }
+
+  boost::beast::http::request<boost::beast::http::string_body> req{boost::beast::http::verb::post,
+                                                                   parsed.target, 11};
+  req.set(boost::beast::http::field::host, parsed.host_header);
+  req.set(boost::beast::http::field::user_agent, PlatformUtils::user_agent());
+  req.set(boost::beast::http::field::content_type, "application/json");
+  for (const auto& header : headers) {
+    req.set(header.first, header.second);
+  }
+  req.body() = body;
+  req.prepare_payload();
+
+  if (parsed.scheme == "https") {
+    impl->applyNetworkTlsSettings();
+    auto session = std::make_shared<Session<true>>(
+      impl->io_ctx, impl.get(), &impl->ssl_ctx, parsed.host, parsed.port, parsed.target, std::move(req),
+      std::move(on_response), nullptr, std::move(on_error), nullptr);
+    session->run();
+  } else if (parsed.scheme == "http") {
+    auto session = std::make_shared<Session<false>>(
+      impl->io_ctx, impl.get(), nullptr, parsed.host, parsed.port, parsed.target, std::move(req),
+      std::move(on_response), nullptr, std::move(on_error), nullptr);
+    session->run();
+  } else {
+    if (on_error) {
+      on_error("Unsupported URL scheme: " + parsed.scheme);
+    }
+  }
+}
+
+void HTTPClient::asyncPostStream(const std::string& url, const Headers& headers, const std::string& body,
+                                 ChunkCallback on_chunk, ErrorCallback on_error,
+                                 CompleteCallback on_complete)
+{
+  ParsedURL parsed = parseURL(url);
+  if (!parsed.error.empty()) {
+    if (on_error) {
+      on_error(parsed.error);
+    }
+    return;
+  }
+  if (parsed.host.empty()) {
+    if (on_error) {
+      on_error("Invalid URL: host is empty");
+    }
+    return;
+  }
+
+  boost::beast::http::request<boost::beast::http::string_body> req{boost::beast::http::verb::post,
+                                                                   parsed.target, 11};
+  req.set(boost::beast::http::field::host, parsed.host_header);
+  req.set(boost::beast::http::field::user_agent, PlatformUtils::user_agent());
+  req.set(boost::beast::http::field::content_type, "application/json");
+  for (const auto& header : headers) {
+    req.set(header.first, header.second);
+  }
+  req.body() = body;
+  req.prepare_payload();
+
+  if (parsed.scheme == "https") {
+    impl->applyNetworkTlsSettings();
+    auto session = std::make_shared<Session<true>>(
+      impl->io_ctx, impl.get(), &impl->ssl_ctx, parsed.host, parsed.port, parsed.target, std::move(req),
+      nullptr, std::move(on_chunk), std::move(on_error), std::move(on_complete));
+    session->run();
+  } else if (parsed.scheme == "http") {
+    auto session = std::make_shared<Session<false>>(
+      impl->io_ctx, impl.get(), nullptr, parsed.host, parsed.port, parsed.target, std::move(req),
+      nullptr, std::move(on_chunk), std::move(on_error), std::move(on_complete));
+    session->run();
+  } else {
+    if (on_error) {
+      on_error("Unsupported URL scheme: " + parsed.scheme);
+    }
+  }
+}
+
+#else  // __EMSCRIPTEN__
+
+class HTTPClient::Impl
+{
+};
+
+HTTPClient::HTTPClient() : impl(std::make_unique<Impl>())
+{
+}
+HTTPClient::~HTTPClient() = default;
+HTTPClient::HTTPClient(HTTPClient&&) noexcept = default;
+HTTPClient& HTTPClient::operator=(HTTPClient&&) noexcept = default;
+
+void HTTPClient::asyncGet(const std::string&, const Headers&, ResponseCallback, ErrorCallback on_error)
+{
+  if (on_error) {
+    on_error("Network client is not supported on WebAssembly.");
+  }
+}
+
+void HTTPClient::asyncPost(const std::string&, const Headers&, const std::string&, ResponseCallback,
+                           ErrorCallback on_error)
+{
+  if (on_error) {
+    on_error("Network client is not supported on WebAssembly.");
+  }
+}
+
+void HTTPClient::asyncPostStream(const std::string&, const Headers&, const std::string&, ChunkCallback,
+                                 ErrorCallback on_error, CompleteCallback)
+{
+  if (on_error) {
+    on_error("Network client is not supported on WebAssembly.");
+  }
+}
+
+#endif  // __EMSCRIPTEN__

@@ -1,30 +1,24 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Generate list of files for translation. The output is saved to po/POTFILES
 # which is needed for the xgettext call.
+# Call from project root, with build directory as first parameter.
 
-for ui in objects/ui_*.h
+set -euo pipefail
+
+for ui in {$1,ming64,mingw32}/OpenSCAD*_autogen/include/ui_*.h
 do
-        for d in mingw64 mingw32 .
-        do
-            if [ -f "$d/$ui" ]
-            then
-                echo "$d/$ui"
-            fi
-        done
+    if [ -f "$ui" ]
+    then
+        echo "$ui"
+    fi
 done
 
-for src in src/*.h src/*.cc src/*.cpp src/*.mm
-do
-	echo $src
-done
-
-for src in src/parameter/*.h src/parameter/*.cc src/parameter/*.cpp
-do
-	echo $src
-done
-
-for src in src/input/*.h src/input/*.cc
-do
-	echo $src
-done
+find src \
+	-name \*.h \
+	-o -name \*.c \
+	-o -name \*.cc \
+	-o -name \*.cpp \
+	-o -name \*.mm \
+	| egrep -v 'src/ext/(glad|hidapi|libtess2|lodepng)/' \
+	| sort -f

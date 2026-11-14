@@ -15,7 +15,7 @@
 	<key>CFBundleIdentifier</key>
 	<string>org.openscad.OpenSCAD</string>
 	<key>CFBundleVersion</key>
-	<string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
+	<string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
 	<key>CFBundleShortVersionString</key>
 	<string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
 	<key>LSEnvironment</key>
@@ -38,6 +38,8 @@
 			<string>OpenSCAD Design</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
+			<key>CFBundleTypeIconSystemGenerated</key>
+			<integer>1</integer>
 			<key>CFBundleTypeIconFile</key>
 			<string>SCAD.icns</string>
 			<key>LSIsAppleDefaultForType</key>
@@ -80,16 +82,6 @@
 			</array>
 			<key>CFBundleTypeName</key>
 			<string>SVG file</string>
-			<key>CFBundleTypeRole</key>
-			<string>Viewer</string>
-		</dict>
-		<dict>
-			<key>CFBundleTypeExtensions</key>
-			<array>
-				<string>amf</string>
-			</array>
-			<key>CFBundleTypeName</key>
-			<string>AMF file</string>
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
 		</dict>

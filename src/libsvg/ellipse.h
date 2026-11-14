@@ -24,27 +24,31 @@
  */
 #pragma once
 
-#include "shape.h"
+#include <string>
+
+#include "libsvg/shape.h"
 
 namespace libsvg {
 
-class ellipse : public shape {
+class ellipse : public shape
+{
 protected:
-    double rx;
-    double ry;
-    
+  double rx{0};
+  double ry{0};
+
 public:
-    ellipse();
-    ~ellipse();
-    
-    double get_radius_x() const { return rx; }
-    double get_radius_y() const { return ry; }
+  ellipse() = default;
 
-    void set_attrs(attr_map_t& attrs) override;
-    const std::string dump() const override;
-    const std::string& get_name() const override { return ellipse::name; };
+  [[nodiscard]] double get_radius_x() const { return rx; }
+  [[nodiscard]] double get_radius_y() const { return ry; }
 
-    static const std::string name;
+  void set_attrs(attr_map_t& attrs, void *context) override;
+  [[nodiscard]] const std::string dump() const override;
+  [[nodiscard]] const std::string& get_name() const override { return ellipse::name; }
+
+  static const std::string name;
+
+  [[nodiscard]] shape *clone() const override { return new ellipse(*this); }
 };
 
-}
+}  // namespace libsvg

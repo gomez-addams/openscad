@@ -1,7 +1,7 @@
 /*
  * The MIT License
  *
- * Copyright (c) 2016-2018, Torsten Paul <torsten.paul@gmx.de>,
+ * Copyright (c) 2016-2026, Torsten Paul <torsten.paul@gmx.de>,
  *                          Marius Kintel <marius@kintel.net>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -22,26 +22,23 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include <map>
-#include <stack>
-#include <vector>
-#include <Eigen/Core>
-#include <Eigen/Geometry>
-#include <boost/filesystem.hpp>
-#include <boost/format.hpp>
+#include "libsvg/libsvg.h"
+
 #include <libxml/xmlreader.h>
 
-#include "libsvg.h"
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+#include <boost/format.hpp>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
-#include "shape.h"
-#include "circle.h"
-#include "ellipse.h"
-#include "line.h"
-#include "polygon.h"
-#include "polyline.h"
-#include "rect.h"
-
-namespace fs = boost::filesystem;
+#include "libsvg/shape.h"
+#include "libsvg/use.h"
 
 namespace libsvg {
 
@@ -51,169 +48,241 @@ static bool in_defs = false;
 static shapes_list_t stack;
 static shapes_list_t *shape_list;
 
+// Limit expansion of use elements by default, see MAX_USE_CLONED_SHAPES.
+static size_t use_cloned_shape_count = 0;
+// Set to lift the the use element limitation.
+bool unlimited_use_cloned_shapes = false;
+
+using shapes_defs_list_t = std::map<std::string, std::shared_ptr<shape>>;
+
 #if SVG_DEBUG
-static std::string dump_stack() {
-	bool first = true;
-	std::stringstream s;
-	s << "[";
-	for (const auto &shape : stack) {
-		s << (first ? "" : "|") << shape->get_name();
-		first = false;
-	}
-	return s.str() + "]";
+static std::string dump_stack()
+{
+  bool first = true;
+  std::stringstream s;
+  s << "[";
+  for (const auto& shape : stack) {
+    s << (first ? "" : "|") << shape->get_name();
+    first = false;
+  }
+  return s.str() + "]";
 }
-#endif
+#endif  // if SVG_DEBUG
 
 attr_map_t read_attributes(xmlTextReaderPtr reader)
 {
-	attr_map_t attrs;
-	int attr_count = xmlTextReaderAttributeCount(reader);
-	for (int idx = 0; idx < attr_count; ++idx) {
-		xmlTextReaderMoveToAttributeNo(reader, idx);
-		const char *name = reinterpret_cast<const char *> (xmlTextReaderName(reader));
-		const char *value = reinterpret_cast<const char *> (xmlTextReaderValue(reader));
-		attrs[name] = value;
-	}
-	return attrs;
+  attr_map_t attrs;
+  int attr_count = xmlTextReaderAttributeCount(reader);
+  for (int idx = 0; idx < attr_count; ++idx) {
+    xmlTextReaderMoveToAttributeNo(reader, idx);
+    const char *name = reinterpret_cast<const char *>(xmlTextReaderName(reader));
+    const char *value = reinterpret_cast<const char *>(xmlTextReaderValue(reader));
+    attrs[name] = value;
+  }
+  return attrs;
 }
 
-void processNode(xmlTextReaderPtr reader)
+void processNode(xmlTextReaderPtr reader, shapes_defs_list_t *defs_lookup_list,
+                 shapes_list_t *temp_defs_storage, void *context)
 {
-	const char *name = reinterpret_cast<const char *> (xmlTextReaderName(reader));
-	if (name == nullptr) name = reinterpret_cast<const char *> (xmlStrdup(BAD_CAST "--"));
+  const char *name = reinterpret_cast<const char *>(xmlTextReaderName(reader));
+  if (name == nullptr) name = reinterpret_cast<const char *>(xmlStrdup(BAD_CAST "--"));
 
-	bool isEmpty;
-	xmlChar *value = xmlTextReaderValue(reader);
-	int node_type = xmlTextReaderNodeType(reader);
-	switch (node_type) {
-	case XML_READER_TYPE_ELEMENT:
-		isEmpty = xmlTextReaderIsEmptyElement(reader);
-	{
+  bool isEmpty;
+  xmlChar *value = xmlTextReaderValue(reader);
+  int node_type = xmlTextReaderNodeType(reader);
+  switch (node_type) {
+  case XML_READER_TYPE_ELEMENT: isEmpty = xmlTextReaderIsEmptyElement(reader); {
 #if SVG_DEBUG
-		printf("XML_READER_TYPE_ELEMENT (%s %s): %d %d %s\n",
-			dump_stack().c_str(), name,
-			xmlTextReaderDepth(reader),
-			xmlTextReaderNodeType(reader),
-			value);
+      printf("XML_READER_TYPE_ELEMENT (%s %s): %d %d %s\n", dump_stack().c_str(), name,
+             xmlTextReaderDepth(reader), xmlTextReaderNodeType(reader), value);
 #endif
 
-		if (std::string("defs") == name) {
-			in_defs = true;
-		}
-		
-		auto s = shared_ptr<shape>(shape::create_from_name(name));
-		if (!in_defs && s) {
-			attr_map_t attrs = read_attributes(reader);
-			s->set_attrs(attrs);
-			shape_list->push_back(s);
-			if (!stack.empty()) {
-				stack.back()->add_child(s.get());
-			}
-			if (s->is_container()) {
-				stack.push_back(s);
-			}
-			s->apply_transform();
-		}
-	}	
-	if (!isEmpty) {
-		break;
-	}
-	/* fall through */
-	case XML_READER_TYPE_END_ELEMENT:
-	{
-		if (std::string("defs") == name) {
-			in_defs = false;
-		}
-		if (in_defs) {
-			return;
-		}
+      if (std::string("defs") == name) {
+        in_defs = true;
+      }
 
-		if (std::string("g") == name) {
-			stack.pop_back();
-		} else if (std::string("tspan") == name) {
-			stack.pop_back();
-		} else if (std::string("text") == name) {
-			stack.pop_back();
-		}
+      auto s = std::shared_ptr<shape>(shape::create_from_name(name));
+      if (s) {
+        attr_map_t attrs = read_attributes(reader);
+        if (!stack.empty()) {
+          stack.back()->add_child(s.get());
+        }
+        s->set_attrs(attrs, context);
+        if (s->is_container()) {
+          stack.push_back(s);
+        }
+
+        // handle the "use" tag
+        if (use::name == s->get_name()) {
+          use *currentuse = dynamic_cast<use *>(s.get());
+          auto id = currentuse->get_href_id();
+          if (!id.empty() && defs_lookup_list->find(id) != defs_lookup_list->end()) {
+            auto to_clone_child = (*defs_lookup_list)[id];
+            auto cloned_children = currentuse->set_clone_child(to_clone_child.get());
+            const size_t would_be_total = use_cloned_shape_count + cloned_children.size();
+            const size_t limit =
+              unlimited_use_cloned_shapes ? std::numeric_limits<size_t>::max() : MAX_USE_CLONED_SHAPES;
+            if (would_be_total > limit) {
+              throw SvgException(
+                (boost::format("<use> elements generated too many shapes (%1%, limit %2%); "
+                               "aborting the SVG import.") %
+                 would_be_total % limit)
+                  .str());
+            }
+            use_cloned_shape_count = would_be_total;
+            shape_list->insert(shape_list->end(), cloned_children.begin(), cloned_children.end());
+          }
+        }
+
+        if (!in_defs) {
+          shape_list->push_back(s);
+        } else {
+          if (!s->get_id_or_default().empty()) {
+            defs_lookup_list->insert(std::make_pair(s->get_id(), s));
+          }
+          temp_defs_storage->push_back(s);
+        }
+      }
+    }
+    if (!isEmpty) {
+      break;
+    }
+  /* fall through */
+  case XML_READER_TYPE_END_ELEMENT: {
+    if (std::string("defs") == name) {
+      in_defs = false;
+    }
+
+    if (std::string("g") == name || std::string("svg") == name || std::string("tspan") == name ||
+        std::string("text") == name) {
+      stack.pop_back();
+    }
 #if SVG_DEBUG
-		printf("XML_READER_TYPE_END_ELEMENT (%s %s): %d %d %s\n",
-			dump_stack().c_str(), name,
-			xmlTextReaderDepth(reader),
-			xmlTextReaderNodeType(reader),
-			value);
+    printf("XML_READER_TYPE_END_ELEMENT (%s %s): %d %d %s\n", dump_stack().c_str(), name,
+           xmlTextReaderDepth(reader), xmlTextReaderNodeType(reader), value);
 #endif
-	}
-		break;
-	case XML_READER_TYPE_TEXT:
-	{
-		attr_map_t attrs;
-		attrs["text"] = reinterpret_cast<const char *>(value);
-		auto s = shared_ptr<shape>(shape::create_from_name("data"));
-		s->set_attrs(attrs);
-		shape_list->push_back(s);
-		if (!stack.empty()) {
-			stack.back()->add_child(s.get());
-		}
-	}
-		break;
-	}
+  } break;
+  case XML_READER_TYPE_TEXT: {
+    attr_map_t attrs;
+    attrs["text"] = reinterpret_cast<const char *>(value);
+    auto s = std::shared_ptr<shape>(shape::create_from_name("data"));
+    if (!stack.empty()) {
+      stack.back()->add_child(s.get());
+    }
+    s->set_attrs(attrs, context);
+    if (!in_defs) {
+      shape_list->push_back(s);
+    } else {
+      temp_defs_storage->push_back(s);
+    }
+  } break;
+  }
 
-	xmlFree(value);
-	xmlFree((void *) (name));
+  xmlFree(value);
+  xmlFree((void *)(name));
 }
 
-int streamFile(const char *filename)
+// Never load any external entity or DTD.
+static xmlParserInput *fail_external_entity_loader(const char *URL, const char *publicId,
+                                                   xmlParserCtxt *context)
 {
-	xmlTextReaderPtr reader;
-
-	in_defs = false;
-	reader = xmlNewTextReaderFilename(filename);
-	xmlTextReaderSetParserProp(reader, XML_PARSER_SUBST_ENTITIES, 1);
-	if (reader != nullptr) {
-		int ret = xmlTextReaderRead(reader);
-		while (ret == 1) {
-			processNode(reader);
-			ret = xmlTextReaderRead(reader);
-		}
-		xmlFreeTextReader(reader);
-		if (ret != 0) {
-			throw SvgException((boost::format("Error parsing file '%1%'") % filename).str());
-		}
-	} else {
-		throw SvgException((boost::format("Can't open file '%1%'") % filename).str());
-	}
-	return 0;
+  (void)URL;
+  (void)publicId;
+  (void)context;
+  return nullptr;
 }
 
-void dump(int idx, shape *s) {
-	for (int a = 0; a < idx; ++a) {
-		std::cout << "  ";
-	}
-	std::cout << "=> " << s->dump() << std::endl;
-	for (const auto& c : s->get_children()) {
-		dump(idx + 1, c);
-	} 
-}
-
-shapes_list_t *
-libsvg_read_file(const char *filename)
+// Temporarily installs fail_external_entity_loader() as libxml2's external
+// entity loader and restores the previous loader afterwards.  The loader is
+// process-global, so it must not leak beyond a single SVG import.
+class external_entity_loader_guard
 {
-	shape_list = new shapes_list_t();
-	streamFile(filename);
+public:
+  explicit external_entity_loader_guard() : previous_loader_(xmlGetExternalEntityLoader())
+  {
+    xmlSetExternalEntityLoader(fail_external_entity_loader);
+  }
 
-//#ifdef DEBUG
-//	if (!shape_list->empty()) {
-//		dump(0, shape_list->front().get());
-//	}
-//#endif
+  ~external_entity_loader_guard() { xmlSetExternalEntityLoader(previous_loader_); }
 
-	return shape_list;
-}
+private:
+  xmlExternalEntityLoader previous_loader_;
+};
 
-void
-libsvg_free(shapes_list_t *shapes)
+int streamFile(const char *filename, void *context)
 {
-	delete shapes;
+  xmlTextReaderPtr reader;
+  // The temp storage is needed for items in a def that don't have an id, but have a parent with an id
+  shapes_list_t temp_defs_storage;
+  shapes_defs_list_t defs_lookup_list;
+
+  in_defs = false;
+  reader = xmlNewTextReaderFilename(filename);
+  if (reader != nullptr) {
+    // Disable expansion of XML entities and external loading.
+    xmlTextReaderSetParserProp(reader, XML_PARSER_SUBST_ENTITIES, 0);
+    xmlTextReaderSetParserProp(reader, XML_PARSER_LOADDTD, 0);
+    external_entity_loader_guard external_loader_guard;
+
+    int ret = xmlTextReaderRead(reader);
+    while (ret == 1) {
+      processNode(reader, &defs_lookup_list, &temp_defs_storage, context);
+      ret = xmlTextReaderRead(reader);
+    }
+    xmlFreeTextReader(reader);
+    if (ret != 0) {
+      throw SvgException((boost::format("Error parsing file '%1%'") % filename).str());
+    }
+  } else {
+    throw SvgException((boost::format("Can't open file '%1%'") % filename).str());
+  }
+
+  for (const auto& shape : (*shape_list)) {
+    shape->apply_transform();
+  }
+
+  return 0;
 }
 
+void dump(int idx, shape *s)
+{
+  for (int a = 0; a < idx; ++a) {
+    std::cout << "  ";
+  }
+  std::cout << "=> " << s->dump() << std::endl;
+  for (const auto& c : s->get_children()) {
+    dump(idx + 1, c);
+  }
 }
+
+shapes_list_t *libsvg_read_file(const char *filename, void *context)
+{
+  shape_list = new shapes_list_t();
+  use_cloned_shape_count = 0;
+  try {
+    streamFile(filename, context);
+  } catch (...) {
+    delete shape_list;
+    shape_list = nullptr;
+    stack.clear();
+    in_defs = false;
+    use_cloned_shape_count = 0;
+    throw;
+  }
+
+  // #ifdef DEBUG
+  //	if (!shape_list->empty()) {
+  //		dump(0, shape_list->front().get());
+  //	}
+  // #endif
+
+  return shape_list;
+}
+
+void libsvg_free(shapes_list_t *shapes)
+{
+  delete shapes;
+}
+
+}  // namespace libsvg

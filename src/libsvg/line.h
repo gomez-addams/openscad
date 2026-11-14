@@ -24,27 +24,31 @@
  */
 #pragma once
 
-#include "shape.h"
+#include <string>
+
+#include "libsvg/shape.h"
 
 namespace libsvg {
 
-class line : public shape {
+class line : public shape
+{
 private:
-    double x2;
-    double y2;
+  double x2{0};
+  double y2{0};
 
 public:
-    line();
-    ~line();
+  line() = default;
 
-    double get_x2() const { return x2; }
-    double get_y2() const { return y2; }
+  [[nodiscard]] double get_x2() const { return x2; }  // NOLINT(bugprone-virtual-near-miss)
+  [[nodiscard]] double get_y2() const { return y2; }  // NOLINT(bugprone-virtual-near-miss)
 
-    void set_attrs(attr_map_t& attrs) override;
-    const std::string dump() const override;
-    const std::string& get_name() const override { return line::name; };
-    
-    static const std::string name;
+  void set_attrs(attr_map_t& attrs, void *context) override;
+  [[nodiscard]] const std::string dump() const override;
+  [[nodiscard]] const std::string& get_name() const override { return line::name; }
+
+  static const std::string name;
+
+  [[nodiscard]] shape *clone() const override { return new line(*this); }
 };
 
-}
+}  // namespace libsvg

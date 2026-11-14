@@ -1,3 +1,5 @@
+#!/bin/sh
+
 # setup environment variables for building OpenSCAD against custom built
 # dependency libraries. works on Linux/BSD.
 #
@@ -7,7 +9,7 @@
 setenv_common()
 {
  if [ ! $BASEDIR ]; then
-  if [ -f openscad.pro ]; then
+  if [ -f openscad.appdata.xml.in ]; then
     # if in main openscad dir, put under $HOME
     BASEDIR=$HOME/openscad_deps
   else
@@ -20,7 +22,7 @@ setenv_common()
  DEPLOYDIR=$BASEDIR
 
  export BASEDIR
- export PATH=$BASEDIR/bin:$PATH
+ export PATH=$BASEDIR/bin:"$PATH"
  export LD_LIBRARY_PATH=$DEPLOYDIR/lib:$DEPLOYDIR/lib64
  export LD_RUN_PATH=$DEPLOYDIR/lib:$DEPLOYDIR/lib64
  export OPENSCAD_LIBRARIES=$DEPLOYDIR
@@ -49,7 +51,7 @@ setenv_freebsd()
  echo .... '. ./scripts/setenv-unibuild.sh clang'
  setenv_common
  QMAKESPEC=freebsd-g++
- QTDIR=/usr/local/share/qt4
+ QTDIR=/usr/local/share/qt5
  export QMAKESPEC
  export QTDIR
 }
@@ -61,9 +63,9 @@ setenv_netbsd()
  echo --- which is incompatible with updated CGAL. 
  echo --- you may need to hack with newer gcc to make it work
  QMAKESPEC=netbsd-g++
- QTDIR=/usr/pkg/qt4
- PATH=/usr/pkg/qt4/bin:$PATH
- LD_LIBRARY_PATH=/usr/pkg/qt4/lib:$LD_LIBRARY_PATH
+ QTDIR=/usr/pkg/qt5
+ PATH=/usr/pkg/qt5/bin:$PATH
+ LD_LIBRARY_PATH=/usr/pkg/qt5/lib:$LD_LIBRARY_PATH
  LD_LIBRARY_PATH=/usr/X11R7/lib:$LD_LIBRARY_PATH
  LD_LIBRARY_PATH=/usr/pkg/lib:$LD_LIBRARY_PATH
 
@@ -110,8 +112,8 @@ setenv_netbsd_clang()
 
 clean_note()
 {
- if [ "`command -v qmake-qt4`" ]; then
-  QMAKEBIN=qmake-qt4
+ if [ "`command -v qmake-qt5`" ]; then
+  QMAKEBIN=qmake-qt5
  else
   QMAKEBIN=qmake
  fi
@@ -147,4 +149,3 @@ if [ -e $DEPLOYDIR/include/Qt ]; then
 fi
 
 clean_note
-

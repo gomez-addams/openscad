@@ -1,6 +1,9 @@
-#!/bin/sh
+#!/usr/bin/env bash
+
+set -euo pipefail
 
 # see doc/translation.txt for more info
+BASEDIR=$PWD
 
 updatepot()
 {
@@ -19,21 +22,21 @@ updatepot()
    exit 1
  fi
 
- # extract example names from the index JSON file
- cat -n examples/examples.json \
-	| grep '\[$' | sed -e 's/^[ \ŧ]*//; s/:.*//' \
-	| awk '{ printf "#: examples/examples.json:%d\nmsgid %s\nmsgstr \"\"\n\n", $1, $2 }' \
+ # example folder names
+ find examples -mindepth 1 -maxdepth 1 -type d -printf "%f\n" \
+	| awk '{ printf "#: examples\nmsgid \"%s\"\nmsgstr \"\"\n\n", $1 }' \
 	> ./locale/json-strings.pot
 
  # extract strings from appdata file
- itstool -o ./locale/appdata-strings.pot ./openscad.appdata.xml.in --its=./contrib/appdata.its
+ itstool -o ./locale/appdata-strings.pot ./openscad.appdata.xml.in2 --its=./contrib/appdata.its
 
  VER=`date +"%Y.%m.%d"`
  OPTS=
  OPTS=$OPTS' --package-name=OpenSCAD'
  OPTS=$OPTS' --package-version='$VER
  OPTS=$OPTS' --default-domain=openscad'
- OPTS=$OPTS' --language=c++' 
+ OPTS=$OPTS' --language=c++'
+ OPTS=$OPTS' --from-code=UTF-8'
  OPTS=$OPTS' --keyword=' #without WORD means not to use default keywords
  OPTS=$OPTS' --keyword=_'
  OPTS=$OPTS' --keyword=q_'
@@ -48,7 +51,6 @@ updatepot()
   echo error running xgettext
   exit 1
  fi
-
  cmd="${GETTEXT_PATH}msgcat -o ./locale/openscad.pot ./locale/openscad-tmp.pot ./locale/json-strings.pot ./locale/appdata-strings.pot"
  echo $cmd
  $cmd
@@ -77,46 +79,37 @@ updatepo()
 
 updatemo()
 {
- SUFFIX="$1"
- for LANGCODE in `cat locale/LINGUAS | grep -v "#"`; do
-  mkdir -p ./locale/$LANGCODE/LC_MESSAGES
-  OPTS='-c -v'
-  cmd="$GETTEXT_PATH"'msgfmt '$OPTS' -o ./locale/'$LANGCODE'/LC_MESSAGES/openscad.mo ./locale/'$LANGCODE'.po'
-  echo $cmd
-  $cmd
-  if [ ! $? = 0 ]; then
-   echo error running msgfmt
-   exit 1
-  fi
- done
-
- if which itstool > /dev/null 2>&1; then
-  # ugly workaround for bug https://bugs.freedesktop.org/show_bug.cgi?id=90937
   for LANGCODE in `cat locale/LINGUAS | grep -v "#"`; do
-   ln -s openscad.mo ./locale/$LANGCODE/LC_MESSAGES/$LANGCODE.mo
+    mkdir -p ./locale/$LANGCODE/LC_MESSAGES
+    OPTS='-c -v'
+    cmd="$GETTEXT_PATH"'msgfmt '$OPTS' -o ./locale/'$LANGCODE'/LC_MESSAGES/openscad.mo ./locale/'$LANGCODE'.po'
+    echo $cmd
+    $cmd
+    if [ ! $? = 0 ]; then
+      echo error running msgfmt
+      exit 1
+    fi
   done
 
-  # generate translated appdata file
-  itstool -j ./openscad.appdata.xml.in -o ./openscad.appdata.xml ./locale/*/LC_MESSAGES/[a-z][a-z].mo
+  if which itstool > /dev/null 2>&1; then
+    # ugly workaround for bug https://bugs.freedesktop.org/show_bug.cgi?id=90937
+    for LANGCODE in `cat locale/LINGUAS | grep -v "#"`; do
+      ln -s openscad.mo ./locale/$LANGCODE/LC_MESSAGES/$LANGCODE.mo
+    done
 
-  # clean the mess
-  for LANGCODE in `cat locale/LINGUAS | grep -v "#"`; do
-   unlink ./locale/$LANGCODE/LC_MESSAGES/$LANGCODE.mo
-  done
- else
-  if [ x"$(uname -s)" = x"Linux" ]; then
-   echo "itstool missing, won't apply translations to openscad.appdata.xml"
+    # generate translated appdata file
+    itstool -j ./openscad.appdata.xml.in2 -o ./openscad.appdata.xml ./locale/*/LC_MESSAGES/[a-z][a-z].mo
+
+    # clean the mess
+    for LANGCODE in `cat locale/LINGUAS | grep -v "#"`; do
+      unlink ./locale/$LANGCODE/LC_MESSAGES/$LANGCODE.mo
+    done
+  else
+    if [ x"$(uname -s)" = x"Linux" ]; then
+      echo "itstool missing, won't apply translations to openscad.appdata.xml"
+    fi
+    cp -f ./openscad.appdata.xml.in2 ./openscad.appdata.xml
   fi
-  cp -f ./openscad.appdata.xml.in ./openscad.appdata.xml
- fi
-
- if test -n "$SUFFIX"
- then
-  echo "using suffix '$SUFFIX'"
- fi
- cp -f ./icons/openscad.desktop.in ./icons/openscad.desktop
- sed -i -e "s,@@openscad@@,openscad${SUFFIX}," ./icons/openscad.desktop
- sed -i -e "s,</id>,${SUFFIX}\\0,; s/openscad.desktop/openscad${SUFFIX}.desktop/; s/openscad.png/openscad${SUFFIX}.png/" ./openscad.appdata.xml
 }
 
 GETTEXT_PATH=""
@@ -129,11 +122,19 @@ TOPDIR="`dirname \"$SCRIPTDIR\"`"
 
 cd "$TOPDIR" || exit 1
 
-if [ "x$1" = xupdatemo ]; then
- updatemo "$2"
+if [ -z ${1+x} ]; then
+  CURDIR="`python3 -c "import os; print(os.path.relpath(os.path.realpath('$BASEDIR'), '$TOPDIR'))"`"
+  echo "Generating POTFILES..."
+  BUILDDIR=$(
+	find "$CURDIR" -name ui_MainWindow.h \
+	| grep OpenSCAD.*_autogen/include/ui_MainWindow.h \
+	| sed -e 's,/*OpenSCAD.*_autogen/include/ui_MainWindow.h,,'
+  )
+  echo "Found directory: $BUILDDIR"
+  ./scripts/generate-potfiles.sh "$BUILDDIR" > locale/POTFILES
+  updatepot && updatepo && updatemo
+elif [ "$1" = updatemo ]; then
+  updatemo
 else
- echo "Generating POTFILES..."
- ./scripts/generate-potfiles.sh > locale/POTFILES
- updatepot && updatepo && updatemo ""
+  echo "usage: $0 [updatemo]"
 fi
-

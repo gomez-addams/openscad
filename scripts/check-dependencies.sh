@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Parse the minimum versions of dependencies from README.md, and compare
 # with what is found on the system. Print results.
 #
@@ -61,8 +62,17 @@ opencsg_sysver()
   debug opencsg_sysver
   if [ ! -e $1/include/opencsg.h ]; then return; fi
   ocsgver=`grep -a "define  *OPENCSG_VERSION_STRING *[0-9x]*" $1/include/opencsg.h`
-  ocsgver=`echo $ocsgver | awk '{print $4}' | sed s/'"'//g | sed s/[^1-9.]//g`
+  ocsgver=`echo $ocsgver | awk '{print $4}' | sed s/'"'//g | sed s/[^0-9.]//g`
   opencsg_sysver_result=$ocsgver
+}
+
+catch2_sysver()
+{
+  catch2path=$1/include/catch2/catch_version_macros.hpp
+  if [ ! -e $catch2path ]; then return; fi
+  catch2maj=`grep "define  *CATCH_VERSION_MAJOR  *[0-9]*" $catch2path | awk '{print $3}'`
+  catch2min=`grep "define  *CATCH_VERSION_MINOR  *[0-9]*" $catch2path | awk '{print $3}'`
+  catch2_sysver_result="$catch2maj.$catch2min"
 }
 
 cgal_sysver()
@@ -119,7 +129,7 @@ fontconfig_sysver()
   if [ ! -e $fcpath ]; then return; fi
   fcmajor=`grep "define *FC_MAJOR.*[0-9.]*" $fcpath | awk '{print $3}'`
   fcminor=`grep "define *FC_MINOR.*[0-9.]*" $fcpath | awk '{print $3}'`
-  fcrevison=`grep "define *FC_REVISION.*[0-9.]*" $fcpath | awk '{print $3}'`
+  fcrevision=`grep "define *FC_REVISION.*[0-9.]*" $fcpath | awk '{print $3}'`
   fontconfig_sysver_result="${fcmajor}.${fcminor}.${fcrevision}"
 }
 
@@ -180,6 +190,10 @@ gmp_sysver()
 
 qt_sysver()
 {
+  if [ -d '/usr/lib/qtchooser' ]; then
+    . <(/usr/lib/qtchooser/qtchooser -print-env)
+    PATH=$PATH:$QTTOOLDIR
+  fi
   if [ "`command -v qtchooser`" ]; then
     qtver=`qtchooser -run-tool=qmake -qt=5 -v 2>&1`
     if [ $? -eq 0 ] ; then
@@ -224,6 +238,9 @@ qscintilla2_sysver()
   # expecting the QT_SELECT already set in case we found qtchooser
   if qmake -v >/dev/null 2>&1 ; then
     QMAKE=qmake
+  fi
+  if qmake6 -v >/dev/null 2>&1 ; then
+    QMAKE=qmake6
   fi
   debug using qmake: $QMAKE
 
@@ -325,7 +342,7 @@ curl_sysver()
 cmake_sysver()
 {
   if [ ! -x $1/bin/cmake ]; then return ; fi
-  cmake_sysver_result=`$1/bin/cmake --version | grep cmake | sed s/"[^0-9.]"/" "/g | awk '{ print $1 }'`
+  cmake_sysver_result="$($1/bin/cmake --version | grep -m 1 cmake | sed s/"[^0-9.]"/" "/g | awk '{ print $1 }')"
 }
 
 make_sysver()
@@ -383,12 +400,12 @@ get_minversion_from_readme()
   debug get_minversion_from_readme $*
 
   # Extract dependency name
-  if [ ! $1 ]; then return; fi
+  if [ ! "$1" ]; then return; fi
   depname=$1
 
   debug $depname
   local grv_tmp=
-  for READFILE in README.md ../README.md "`dirname "$0"`/../README.md"
+  for READFILE in README.md ../README.md "$(dirname "$0")/../README.md"
   do
     if [ ! -e "$READFILE" ]
     then
@@ -396,16 +413,25 @@ get_minversion_from_readme()
       continue
     fi
     debug "get_minversion_from_readme $READFILE found"
-    grep -qi ".$depname.*([0-9]" $READFILE || continue
-    grv_tmp="`grep -i ".$depname.*([0-9]" $READFILE | sed s/"*"//`"
-    debug $grv_tmp
-    grv_tmp="`echo $grv_tmp | awk -F"(" '{print $2}'`"
-    debug $grv_tmp
-    grv_tmp="`echo $grv_tmp | awk -F"-" '{print $1}'`"
-    debug $grv_tmp
-    grv_tmp="`echo $grv_tmp | sed s/"x"/"0"/g`"
-    debug $grv_tmp
-    grv_tmp="`echo $grv_tmp | sed s/"[^0-9.]"//g`"
+    grv_tmp="$(awk -v depname="$depname" '
+      /^[[:space:]]*\*/ {
+        line = $0
+        dep = line
+        sub(/^[[:space:]]*\*+[[:space:]]*/, "", dep)
+        sub(/^\[/, "", dep)
+        sub(/\].*/, "", dep)
+        sub(/[[:space:]]*\(.*/, "", dep)
+
+        if (tolower(dep) == tolower(depname) && match(line, /\([[:space:]]*[0-9][^)]*\)/)) {
+          version = substr(line, RSTART + 1, RLENGTH - 2)
+          sub(/[[:space:]]*-.*/, "", version)
+          gsub(/[xX]/, "0", version)
+          gsub(/[^0-9.]/, "", version)
+          print version
+          exit
+        }
+      }
+    ' "$READFILE")"
     debug $grv_tmp
     if [ "z$grv_tmp" = "z" ]
     then
@@ -423,19 +449,63 @@ get_minversion_from_readme()
   fi
 }
 
+get_minversion_from_cmake()
+{
+  debug get_minversion_from_cmake
+
+  local gmvc_tmp=
+  for CMAKEFILE in CMakeLists.txt ../CMakeLists.txt "$(dirname "$0")/../CMakeLists.txt"
+  do
+    if [ ! -e "$CMAKEFILE" ]
+    then
+      debug "get_minversion_from_cmake $CMAKEFILE not found"
+      continue
+    fi
+    debug "get_minversion_from_cmake $CMAKEFILE found"
+    gmvc_tmp="$(awk '
+      /^[[:space:]]*cmake_minimum_required[[:space:]]*\(/ {
+        line = tolower($0)
+        if (match(line, /version[[:space:]]+[0-9][0-9.]*/)) {
+          version = substr(line, RSTART, RLENGTH)
+          sub(/^version[[:space:]]+/, "", version)
+          print version
+          exit
+        }
+      }
+    ' "$CMAKEFILE")"
+    debug "$gmvc_tmp"
+    if [ "z$gmvc_tmp" = "z" ]
+    then
+      debug "get_minversion_from_cmake no result from $CMAKEFILE"
+      continue
+    fi
+    get_minversion_from_cmake_result=$gmvc_tmp
+    return 0
+  done
+
+  debug "get_minversion_from_cmake no result found anywhere"
+  get_minversion_from_cmake_result=""
+  return 0
+}
+
 find_min_version()
 {
   find_min_version_result=
   fmvtmp=
-  if [ ! $1 ] ; then return; fi
+  if [ ! "$1" ] ; then return; fi
   fmvdep=$1
   get_minversion_from_readme $fmvdep
   fmvtmp=$get_minversion_from_readme_result
 
+  if [ "$fmvdep" = "cmake" ]; then
+    get_minversion_from_cmake
+    fmvtmp=$get_minversion_from_cmake_result
+  fi
+
   # items not included in README.md
   if [ $fmvdep = "git" ]; then fmvtmp=1.5 ; fi
   if [ $fmvdep = "curl" ]; then fmvtmp=6 ; fi
-  if [ $fmvdep = "make" ]; then fmvtmp=3 ; fi
+  if [ "$fmvdep" = "make" ]; then fmvtmp=3 ; fi
   if [ $fmvdep = "python" ]; then fmvtmp=2 ; fi
 
   find_min_version_result=$fmvtmp
@@ -467,8 +537,8 @@ vers_to_int()
 
 version_less_than_or_equal()
 {
-  if [ ! $1 ]; then return; fi
-  if [ ! $2 ]; then return; fi
+  if [ ! "$1" ]; then return; fi
+  if [ ! "$2" ]; then return; fi
   v1=$1
   v2=$2
   vers_to_int $v1
@@ -493,12 +563,12 @@ compare_version()
 {
   debug compare_version $*
   compare_version_result="NotOK"
-  if [ ! $1 ] ; then return; fi
-  if [ ! $2 ] ; then return; fi
-  cvminver=$1
-  cvinstver=$2
+  if [ ! "$1" ] ; then return; fi
+  if [ ! "$2" ] ; then return; fi
+  cvminver="$1"
+  cvinstver="$2"
   cvtmp=
-  version_less_than_or_equal $cvminver $cvinstver
+  version_less_than_or_equal "$cvminver" "$cvinstver"
   if [ $? = 0 ]; then
     cvtmp="OK"
   else
@@ -532,15 +602,15 @@ pretty_print()
   ppstr="%s%-18s"
   pp_format='{printf("'$ppstr$ppstr$ppstr$ppstr$nocolor'\n",$1,$2,$3,$4,$5,$6,$7,$8)}'
   pp_title="$gray depname $gray minimum $gray found $gray OKness"
-  if [ $1 ]; then pp_depname=$1; fi
+  if [ "$1" ]; then pp_depname=$1; fi
   if [ $pp_depname = "title" ]; then
     echo -e $pp_title | awk $pp_format
     return ;
   fi
 
-  if [ $2 ]; then pp_minver=$2; else pp_minver="unknown"; fi
-  if [ $3 ]; then pp_foundver=$3; else pp_foundver="unknown"; fi
-  if [ $4 ]; then pp_okness=$4; else pp_okness="NotOK"; fi
+  if [ "$2" ]; then pp_minver=$2; else pp_minver="unknown"; fi
+  if [ "$3" ]; then pp_foundver=$3; else pp_foundver="unknown"; fi
+  if [ "$4" ]; then pp_okness=$4; else pp_okness="NotOK"; fi
 
   if [ $pp_okness = "NotOK" ]; then
     pp_foundcolor=$purple;
@@ -565,21 +635,21 @@ find_installed_version()
 
   # try to find/parse headers and/or binary output
   # break on the first match. (change the order to change precedence)
-  if [ ! $fsv_tmp ]; then
+  if [ ! "${fsv_tmp}" ]; then
     for syspath in $OPENSCAD_LIBRARIES "/usr/local" "/opt/local" "/usr/pkg" "/usr"; do
-      if [ -e $syspath ]; then
+      if [ -e "${syspath}" ]; then
         # strip hyphens from dependency name
         depnameclean=`echo $depname | sed s/-//g`
-        debug $depnameclean"_sysver" $syspath
-        eval $depnameclean"_sysver" $syspath
+        debug $depnameclean"_sysver" "${syspath}"
+        eval $depnameclean"_sysver" "${syspath}"
         fsv_tmp=`eval echo "$"$depnameclean"_sysver_result"`
-        if [ $fsv_tmp ]; then break; fi
+        if [ "${fsv_tmp}" ]; then break; fi
       fi
     done
   fi
 
   # use pkg-config to search
-  if [ ! $fsv_tmp ]; then
+  if [ ! "${fsv_tmp}" ]; then
     if [ "`command -v pkg-config`" ]; then
       debug plain search failed. trying pkg_config...
       pkg_config_search $depname
@@ -587,8 +657,8 @@ find_installed_version()
     fi
   fi
 
-  if [ $fsv_tmp ]; then
-    find_installed_version_result=$fsv_tmp
+  if [ "${fsv_tmp}" ]; then
+    find_installed_version_result="${fsv_tmp}"
   else
     debug all searches failed. unknown version.
   fi
@@ -656,9 +726,9 @@ checkargs()
 
 main()
 {
-  deps="qt qscintilla2 cgal gmp mpfr boost opencsg glew eigen glib2 fontconfig freetype2 harfbuzz libzip bison flex make double-conversion"
+  deps="qt qscintilla2 cmake catch2 cgal gmp mpfr boost opencsg glew eigen glib2 fontconfig freetype2 harfbuzz libzip bison flex make double-conversion"
   #deps="$deps curl git" # not technically necessary for build
-  #deps="$deps python cmake imagemagick" # only needed for tests
+  #deps="$deps python imagemagick" # only needed for tests
   #deps="cgal"
   pretty_print title
   for depname in $deps; do
@@ -667,9 +737,9 @@ main()
     dep_sysver=$find_installed_version_result
     find_min_version $depname
     dep_minver=$find_min_version_result
-    compare_version $dep_minver $dep_sysver
-    dep_compare=$compare_version_result
-    pretty_print $depname "$dep_minver" "$dep_sysver" $dep_compare
+    compare_version "$dep_minver" "$dep_sysver"
+    dep_compare="$compare_version_result"
+    pretty_print "$depname" "$dep_minver" "$dep_sysver" "$dep_compare"
   done
   check_old_local
   check_misc
@@ -678,4 +748,3 @@ main()
 checkargs $*
 main
 exit 0
-

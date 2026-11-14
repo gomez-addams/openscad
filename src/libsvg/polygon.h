@@ -24,22 +24,26 @@
  */
 #pragma once
 
-#include "shape.h"
+#include <string>
+
+#include "libsvg/shape.h"
 
 namespace libsvg {
 
-class polygon : public shape {
+class polygon : public shape
+{
 private:
-    std::string points;
+  std::string points;
 
 public:
-    polygon();
-    ~polygon();
+  polygon() = default;
 
-    void set_attrs(attr_map_t& attrs) override;
-    const std::string& get_name() const override { return polygon::name; };
+  void set_attrs(attr_map_t& attrs, void *context) override;
+  [[nodiscard]] const std::string& get_name() const override { return polygon::name; }
 
-    static const std::string name;
+  static const std::string name;
+
+  [[nodiscard]] shape *clone() const override { return new polygon(*this); }
 };
 
-}
+}  // namespace libsvg

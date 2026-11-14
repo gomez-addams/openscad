@@ -24,22 +24,26 @@
  */
 #pragma once
 
-#include "shape.h"
+#include <string>
+
+#include "libsvg/shape.h"
 
 namespace libsvg {
 
-class polyline : public shape {
+class polyline : public shape
+{
 private:
-    std::string points;
+  std::string points;
 
 public:
-    polyline();
-    ~polyline();
+  polyline() = default;
 
-    void set_attrs(attr_map_t& attrs) override;
-    const std::string& get_name() const override { return polyline::name; };
-    
-    static const std::string name;
+  void set_attrs(attr_map_t& attrs, void *context) override;
+  [[nodiscard]] const std::string& get_name() const override { return polyline::name; }
+
+  static const std::string name;
+
+  [[nodiscard]] shape *clone() const override { return new polyline(*this); }
 };
 
-}
+}  // namespace libsvg

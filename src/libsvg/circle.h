@@ -24,25 +24,29 @@
  */
 #pragma once
 
-#include "shape.h"
+#include <string>
+
+#include "libsvg/shape.h"
 
 namespace libsvg {
 
-class circle : public shape {
+class circle : public shape
+{
 protected:
-    double r;
-    
+  double r{0};
+
 public:
-    circle();
-    ~circle();
+  circle() = default;
 
-    double get_radius() const { return r; }
+  [[nodiscard]] double get_radius() const { return r; }
 
-    void set_attrs(attr_map_t& attrs) override;
-    const std::string dump() const override;
-    const std::string& get_name() const override { return circle::name; };
+  void set_attrs(attr_map_t& attrs, void *context) override;
+  [[nodiscard]] const std::string dump() const override;
+  [[nodiscard]] const std::string& get_name() const override { return circle::name; }
 
-    static const std::string name;
+  static const std::string name;
+
+  [[nodiscard]] shape *clone() const override { return new circle(*this); }
 };
 
-}
+}  // namespace libsvg

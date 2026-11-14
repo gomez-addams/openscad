@@ -23,50 +23,63 @@
  *
  */
 
-#ifndef RENDERSTATISTIC_H
-#define RENDERSTATISTIC_H
-
-#include "Geometry.h"
+#pragma once
 
 #include <chrono>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "geometry/Geometry.h"
+#include "glview/Camera.h"
 
 /**
  * An utility class to collect and print rendering statistics for the given
  * geometry
  */
-class RenderStatistic: protected GeometryVisitor
+class RenderStatistic
 {
 public:
+  constexpr static auto CACHE = "cache";
+  constexpr static auto TIME = "time";
+  constexpr static auto CAMERA = "camera";
+  constexpr static auto GEOMETRY = "geometry";
+  constexpr static auto BOUNDING_BOX = "bounding-box";
+  constexpr static auto AREA = "area";
+
   /**
-   * Construct a statistic printer for the given geometry
+   * Construct a statistic printer for the given geometry with current
+   * time as start time.
    */
-  RenderStatistic() {};
-  
+  RenderStatistic();
+
+  /**
+   * Set start time when reusing a RenderStatistic instance.
+   */
+  void start();
+
+  /**
+   * Return render time in milliseconds.
+   */
+  std::chrono::milliseconds ms();
+
   /**
    * Print some statistic on cache usage. Namely, stats on the @ref GeometryCache
    * and @ref CGALCache (if enabled).
    */
-  static void printCacheStatistic();
-  
+  void printCacheStatistic();
+
   /**
    * Format and print time elapsed by rendering.
-   * @arg time elapsed by rendering in seconds
    */
-  static void printRenderingTime(std::chrono::milliseconds ms);
-  
-  /**
-   * Actually print the statistic based on the given Geometry
-   * @arg geom A Geometry-derived object statistic for which we should print.
-   */
-  void print(const Geometry &geom);
-  
-protected:
-  void visit(const class GeometryList &node) override;
-  void visit(const class PolySet &node) override;
-  void visit(const class Polygon2d &node) override;
-#ifdef ENABLE_CGAL
-  void visit(const class CGAL_Nef_polyhedron &node) override;
-#endif // ENABLE_CGAL
-};
+  void printRenderingTime();
 
-#endif // RENDERSTATISTIC_H
+  /**
+   * Print all available statistic information.
+   */
+  void printAll(const std::shared_ptr<const Geometry>& geom, const Camera& camera,
+                const std::vector<std::string>& options = {}, const std::string& filename = {});
+
+private:
+  std::chrono::steady_clock::time_point begin;
+};

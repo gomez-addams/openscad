@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 #
 # Regression test driver for cmd-line tools
 #
@@ -6,11 +6,11 @@
 #
 # If the -g option is given or the TEST_GENERATE environment variable is set to 1,
 # *-expected.<suffix> files will be generated instead of running the tests.
-# 
+#
 # Any generated output is written to the file `basename <argument`-actual.<suffix>
 # Any warning or errors are written to stderr.
 #
-# The test is run with OPENSCAD_FONT_PATH set to the testdata/ttf directory. This
+# The test is run with OPENSCAD_FONT_PATH set to the tests/data/ttf directory. This
 # should ensure we fetch the fonts from there even if they are also installed
 # on the system. (E.g. the C glyph is actually different from Debian/Jessie
 # installation and what we ship as Liberation-2.00.1).
@@ -18,11 +18,10 @@
 # Returns 0 on passed test
 #         1 on error
 #         2 on invalid cmd-line options
-# 
+#
 # Author: Marius Kintel <marius@kintel.net>
 #
 
-from __future__ import print_function
 
 import sys
 import os
@@ -34,9 +33,17 @@ import shutil
 import platform
 import string
 import difflib
+from pathlib import Path
 
 #_debug_tcct = True
 _debug_tcct = False
+
+# Path from the build/tests to the tests source dir
+# when test goldens were created
+build_to_test_sources = "../../tests"
+
+def get_runtime_to_test_sources():
+    return Path(os.path.relpath(os.path.dirname(__file__))).as_posix()
 
 def debug(*args):
     global _debug_tcct
@@ -75,7 +82,7 @@ def verify_test(testname, cmd):
     global expectedfilename, actualfilename
     if not options.generate:
         if not os.path.isfile(expectedfilename):
-            print("Error: test '%s' is missing expected output in %s" % (testname, expectedfilename), file=sys.stderr)
+            print(f"Error: test '{testname}' is missing expected output in {expectedfilename}", file=sys.stderr)
             # next 2 imgs parsed by test_pretty_print.py
             print(' actual image: ' + actualfilename + '\n', file=sys.stderr)
             print(' expected image: ' + expectedfilename + '\n', file=sys.stderr)
@@ -105,8 +112,9 @@ def normalize_string(s):
 
     This also normalizes away import paths from 'file = ' arguments."""
 
-    s = re.sub(', timestamp = [0-9]+', '', s)
-    
+    # timestamp can potentially be negative since stdlibc++ internally uses an epoch based in year 2174
+    s = re.sub(', timestamp = -?[0-9]+', '', s)
+
     """ Don't replace floats after implementing double-conversion library
     def floatrep(match):
         value = float(match.groups()[0])
@@ -117,58 +125,106 @@ def normalize_string(s):
         return "%.6g"%value
     s = re.sub('(-?[0-9]+(\\.[0-9]+)?(e[+-][0-9]+)?)', floatrep, s)
     """
+
+    """ Relative file paths are hopefully consistent across platforms now?
     def pathrep(match):
         return match.groups()[0] + match.groups()[2]
     s = re.sub('(file = ")([^"/]*/)*([^"]*")', pathrep, s)
+    """
 
     return s
 
-def get_normalized_text(filename):
-    try: 
+def get_normalized_lines(filename, replace_paths=False):
+    try:
         f = open(filename)
         text = f.read()
-    except: 
-        text = ''
-    text = normalize_string(text)
-    return text.strip("\r\n").replace("\r\n", "\n") + "\n"
+    except:
+      try:
+        # 'ord-tests.scad' contains some invalid UTF-8 chars.
+        # latin-1 is for "files in an ASCII compatible encoding,
+        # best effort is acceptable".
+        f = open(filename, encoding="latin-1")
+        text = f.read()
+      except Exception as err:
+        # do not fail silently
+        text = "could not read " + "\n" + filename + "\n" + repr(err)
+    text = normalize_string(text).strip("\r\n").replace("\r\n", "\n") + "\n"
+    if replace_paths:
+        runtime_to_test_sources = get_runtime_to_test_sources()
+        if runtime_to_test_sources != build_to_test_sources:
+            text = text.replace(build_to_test_sources, runtime_to_test_sources)
 
-def compare_text(expected, actual):
-    return get_normalized_text(expected) == get_normalized_text(actual)
+    if options.exclude_line_re is None:
+        return text.splitlines()
+
+    def include_line(line):
+        include = not options.exclude_line_re.search(line)
+        if options.exclude_debug:
+            if include:
+                print(f" : {line}", file=sys.stderr)
+            else:
+                print(f"X: {line}", file=sys.stderr)
+        return include
+
+    return [ line for line in text.splitlines() if include_line(line) ]
 
 def compare_default(resultfilename):
     print('text comparison: ', file=sys.stderr)
     print(' expected textfile: ', expectedfilename, file=sys.stderr)
     print(' actual textfile: ', resultfilename, file=sys.stderr)
-    expected_text = get_normalized_text(expectedfilename)
-    actual_text = get_normalized_text(resultfilename)
-    if not expected_text == actual_text:
-        if resultfilename: 
+    expected_lines = get_normalized_lines(expectedfilename, True)
+    actual_lines   = get_normalized_lines(resultfilename)
+    if not expected_lines == actual_lines:
+        if resultfilename:
             differences = difflib.unified_diff(
-                [line for line in expected_text.splitlines()],
-                [line for line in actual_text.splitlines()])
-            line = None
+                [ line for line in expected_lines ],
+                [ line for line in actual_lines   ])
             for line in differences: sys.stderr.write(line + '\n')
-            if not line: return True
+        return False
+    return True
+
+def get_json(filename):
+    import json
+    try:
+        f = open(filename)
+        return json.load(f)
+    except err:
+        # do not fail silently
+        return "could not read " + "\n" + filename + "\n" + repr(err)
+
+def compare_json(resultfilename):
+    print('json comparison: ', file=sys.stderr)
+    print(' expected json file: ', expectedfilename, file=sys.stderr)
+    print(' actual json file: ', resultfilename, file=sys.stderr)
+    expected_data = get_json(expectedfilename)
+    actual_data = get_json(resultfilename)
+    if expected_data != actual_data:
+        import json
+        import difflib
+        expected_lines = json.dumps(expected_data, indent=1).splitlines(keepends=True)
+        actual_lines = json.dumps(actual_data, indent=1).splitlines(keepends=True)
+        sys.stderr.writelines(difflib.unified_diff(expected_lines, actual_lines, fromfile=expectedfilename, tofile=resultfilename))
         return False
     return True
 
 def compare_png(resultfilename):
-    compare_method = 'pixel'
-    #args = [expectedfilename, resultfilename, "-alpha", "Off", "-compose", "difference", "-composite", "-threshold", "10%", "-blur", "2", "-threshold", "30%", "-format", "%[fx:w*h*mean]", "info:"]
-    args = [expectedfilename, resultfilename, "-alpha", "On", "-compose", "difference", "-composite", "-threshold", "10%", "-morphology", "Erode", options.kernel, "-format", "%[fx:w*h*mean]", "info:"]
+    if options.comparator == 'image_compare':
+      compare_method = 'image_compare'
+      args = [os.path.join(get_runtime_to_test_sources(), 'image_compare.py'),
+              expectedfilename, resultfilename]
 
     # for systems with older imagemagick that doesn't support '-morphology'
     # http://www.imagemagick.org/Usage/morphology/#alturnative
-    if options.comparator == 'old':
-      args = [expectedfilename, resultfilename, "-alpha", "Off", "-compose", "difference", "-composite", "-threshold", "10%", "-gaussian-blur","3x65535", "-threshold", "99.99%", "-format", "%[fx:w*h*mean]", "info:"]
+    elif options.comparator == 'old':
+      args = [expectedfilename, resultfilename, "-alpha", "Off", "-compose", "difference", "-composite", "-threshold", "8%", "-gaussian-blur","3x65535", "-threshold", "99.99%", "-format", "%[fx:w*h*mean]", "info:"]
 
-    if options.comparator == 'ncc':
+    elif options.comparator == 'ncc':
       # for systems where imagemagick crashes when using the above comparators
       args = [expectedfilename, resultfilename, "-alpha", "Off", "-compose", "difference", "-metric", "NCC", "tmp.png"]
       options.comparison_exec = 'compare'
       compare_method = 'NCC'
 
-    if options.comparator == 'diffpng':
+    elif options.comparator == 'diffpng':
       # alternative to imagemagick based on Yee's algorithm
 
       # Writing the 'difference image' with --output is very useful for debugging but takes a long time
@@ -176,6 +232,10 @@ def compare_png(resultfilename):
 
       args = [expectedfilename, resultfilename]
       compare_method = 'diffpng'
+
+    else:
+      compare_method = 'pixel'
+      args = [expectedfilename, resultfilename, "-alpha", "On", "-compose", "difference", "-composite", "-threshold", "8%", "-morphology", "Erode", options.kernel, "-format", "%[fx:w*h*mean]", "info:"]
 
     print('Image comparison cmdline: ' + options.comparison_exec + ' ' + ' '.join(args), file=sys.stderr)
 
@@ -202,6 +262,8 @@ def compare_png(resultfilename):
         elif compare_method=='diffpng':
             if 'MATCHES:' in output: return True
             if 'DIFFERS:' in output: return False
+        elif compare_method=='image_compare':
+            return True
     return False
 
 def compare_with_expected(resultfilename):
@@ -219,16 +281,26 @@ def post_process_3mf(filename):
     print('post processing 3MF file (extracting XML data from ZIP): ', filename)
     from zipfile import ZipFile
     xml_content = ZipFile(filename).read("3D/3dmodel.model")
-    xml_content = re.sub('UUID="[^"]*"', 'UUID="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXX"', xml_content.decode('utf-8'))
-    # add tag end whitespace for lib3mf 2.0 output files
-    xml_content = re.sub('\"/>', '\" />', xml_content)
+    xml_content = xml_content.decode('utf-8')
+    # Remove the UUIDs
+    xml_content = re.sub(r'UUID="[^"]*"', r'UUID="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXX"', xml_content)
+    # Remove the timestampe in metadata
+    xml_content = re.sub(r'(<metadata[^>]*"CreationDate"[^>]*>)[0-9-]{10}T[0-9:]{8}Z(</metadata>)', r'\1XXXX-XX-XXTXXXXXXXXZ\2', xml_content)
+    # lib3mf does not allow setting the preserve="?" attribute for metadata
+    xml_content = re.sub(r'(<metadata[^>]*?)\s+preserve\s*=\s*"[^"]*"([^>]*>)', r'\1\2', xml_content)
+    # lib3mf v1 does not allow setting the alpha channel of base material display colors
+    xml_content = re.sub(r'(<base name="[^"]*" displaycolor="[^"]*).."', r'\1FF"', xml_content)
+    # lib3mf v2 has an additional namespace attributes compared to v1, remove all xmlsns:xxx attributes, keep only default ns
+    xml_content = re.sub(r'\s*xmlns:[a-z]+\s*=\s*"[^"]+"\s*', '', xml_content)
+    # Normalize end whitespaces of all self closing tags that have attributes
+    xml_content = re.sub(r'"\s*/>', r'" />', xml_content)
     with open(filename, 'wb') as xml_file:
         xml_file.write(xml_content.encode('utf-8'))
 
 def run_test(testname, cmd, args, redirect_stdin=False, redirect_stdout=False):
     cmdname = os.path.split(options.cmd)[1]
 
-    if options.generate: 
+    if options.generate:
         if not os.path.exists(expecteddir):
             try:
                 os.makedirs(expecteddir)
@@ -257,10 +329,15 @@ def run_test(testname, cmd, args, redirect_stdin=False, redirect_stdout=False):
         args[0] = "-"
 
     try:
-        cmdline = [cmd] + args + ['-' if redirect_stdout else outputname]
+        is_openscad = os.path.split(cmd)[1].lower().startswith("openscad")
+        if(is_openscad):
+            outargs = ['-o', '-'] if (redirect_stdout) else ['-o', outputname]
+        else:
+            outargs = [outputname]
+        cmdline = [cmd] + args + outargs
         sys.stderr.flush()
         print('run_test() cmdline:', ' '.join(cmdline))
-        fontdir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "testdata/ttf"))
+        fontdir = os.path.abspath(os.path.join(os.path.dirname(__file__), "data/ttf"))
         fontenv = os.environ.copy()
         fontenv["OPENSCAD_FONT_PATH"] = fontdir
         print('using font directory:', fontdir)
@@ -282,7 +359,7 @@ def run_test(testname, cmd, args, redirect_stdin=False, redirect_stdout=False):
 
         return outputname
     except (OSError) as err:
-        print("Error: %s \"%s\"" % (err.strerror, cmd), file=sys.stderr)
+        print(f'Error: {err.strerror} "{cmd}"', file=sys.stderr)
         return None
 
 class Options:
@@ -296,28 +373,37 @@ class Options:
 def usage():
     print("Usage: " + sys.argv[0] + " [<options>] <cmdline-tool> <argument>", file=sys.stderr)
     print("Options:", file=sys.stderr)
-    print("  -g, --generate           Generate expected output for the given tests", file=sys.stderr)
-    print("  -s, --suffix=<suffix>    Write -expected and -actual files with the given suffix instead of .txt", file=sys.stderr)
-    print("  -k, --kernel=<name[:n]>  Define kernel name and optionally size for morphology processing, default is Square:1", file=sys.stderr)
-    print("  -e, --expected-dir=<dir> Use -expected files from the given dir (to share files between test drivers)", file=sys.stderr)
-    print("  -t, --test=<name>        Specify test name instead of deducting it from the argument (defaults to basename <exe>)", file=sys.stderr)
-    print("  -f, --file=<name>        Specify test file instead of deducting it from the argument (default to basename <first arg>)", file=sys.stderr)
-    print("  -c, --convexec=<name>    Path to ImageMagick 'convert' executable", file=sys.stderr)
-    print("      --stdin              Pipe input file to <cmdline-tool> by stdin, replacing input file name with '-' when calling <cmdline-tool>", file=sys.stderr)
-    print("      --stdout             Pipe output of <cmdline-tool> to output file, replacing output file name with '-' when calling <cmdline-tool>", file=sys.stderr)
+    print("  -g, --generate             Generate expected output for the given tests", file=sys.stderr)
+    print("  -s, --suffix=<suffix>      Write -expected and -actual files with the given suffix instead of .txt", file=sys.stderr)
+    print("  -k, --kernel=<name[:n]>    Define kernel name and optionally size for morphology processing, default is Square:1", file=sys.stderr)
+    print("  -e, --expected-dir=<dir>   Use -expected files from the given dir (to share files between test drivers)", file=sys.stderr)
+    print("  -t, --test=<name>          Specify test name instead of deducting it from the argument (defaults to basename <exe>)", file=sys.stderr)
+    print("  -f, --file=<name>          Specify test file instead of deducting it from the argument (default to basename <first arg>)", file=sys.stderr)
+    print("  -c, --convexec=<name>      Path to ImageMagick 'convert' executable", file=sys.stderr)
+    print("  -x, --exclude-line=<regex> Ignore lines matching <regex> in text comparisons", file=sys.stderr)
+    print("  -X, --exclude-debug        Show what lines have been included/excluded from text comparison", file=sys.stderr)
+    print("      --stdin                Pipe input file to <cmdline-tool> by stdin, replacing input file name with '-' when calling <cmdline-tool>", file=sys.stderr)
+    print("      --stdout               Pipe output of <cmdline-tool> to output file, replacing output file name with '-' when calling <cmdline-tool>", file=sys.stderr)
 
 if __name__ == '__main__':
     # Handle command-line arguments
     try:
         debug('args:'+str(sys.argv))
-        opts, args = getopt.getopt(sys.argv[1:], "gs:k:e:c:t:f:m", ["generate", "convexec=", "suffix=", "kernel=", "expected_dir=", "test=", "file=", "comparator=", "stdin", "stdout"])
+        opts, args = getopt.getopt(sys.argv[1:], "gs:k:e:c:t:f:m:x:X", [
+            "generate", "convexec=", "suffix=", "kernel=", "expected-dir=",
+            "test=", "file=", "comparator=", "stdin", "stdout", "exclude-line=",
+            "exclude-debug"])
         debug('getopt args:'+str(sys.argv))
     except (getopt.GetoptError) as err:
         usage()
         sys.exit(2)
 
+    exclude_line = os.getenv("OPENSCAD_TEST_EXCLUDE_LINE")
+
     global options
     options = Options()
+    options.exclude_line_re = None
+    options.exclude_debug = os.getenv("OPENSCAD_TEST_EXCLUDE_DEBUG", "False") not in ("False", "0", "")
     options.regressiondir = os.path.join(os.path.split(sys.argv[0])[0], "regression")
     options.generate = False
     options.suffix = "txt"
@@ -327,7 +413,15 @@ if __name__ == '__main__':
     options.stdout = False
 
     for o, a in opts:
-        if o in ("-g", "--generate"): options.generate = True
+        if o in ("-g", "--generate"):
+            options.generate = True
+        elif o in ("-x", "--exclude-line"):
+            if exclude_line:
+                exclude_line = f'({a})|(?:{exclude_line})'
+            else:
+                exclude_line = a
+        elif o in ("-X", "--exclude-debug"):
+            options.exclude_debug = True
         elif o in ("-s", "--suffix"):
             if a[0] == '.': options.suffix = a[1:]
             else: options.suffix = a
@@ -339,7 +433,7 @@ if __name__ == '__main__':
             options.testname = a
         elif o in ("-f", "--file"):
             options.filename = a
-        elif o in ("-c", "--compare-exec"): 
+        elif o in ("-c", "--convexec"):
             options.comparison_exec = os.path.normpath( a )
         elif o in ("-m", "--comparator"):
             options.comparator = a
@@ -353,6 +447,14 @@ if __name__ == '__main__':
         usage()
         sys.exit(2)
     options.cmd = args[0]
+
+    if exclude_line:
+        try:
+            print(f"Excluding lines based on regex: {exclude_line}", file=sys.stderr)
+            options.exclude_line_re = re.compile(exclude_line)
+        except Exception as e:
+            print(f"Invalid regex: {exclude_line}\n  {e}", file=sys.stderr)
+            sys.exit(3)
 
     # If only one test file, we can usually deduct the test name from the file
     if len(args) == 2:

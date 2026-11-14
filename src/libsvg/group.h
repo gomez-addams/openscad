@@ -24,24 +24,27 @@
  */
 #pragma once
 
-#include "shape.h"
+#include <string>
+
+#include "libsvg/shape.h"
 
 namespace libsvg {
 
-class group : public shape {
+class group : public shape
+{
 protected:
-
 public:
-    group();
-    ~group();
+  group() = default;
 
-    bool is_container() const override { return true; }
-    
-    void set_attrs(attr_map_t& attrs) override;
-    const std::string dump() const override;
-    const std::string& get_name() const override { return group::name; };
-    
-    static const std::string name;
+  [[nodiscard]] bool is_container() const override { return true; }
+
+  void set_attrs(attr_map_t& attrs, void *context) override;
+  [[nodiscard]] const std::string dump() const override;
+  [[nodiscard]] const std::string& get_name() const override { return group::name; }
+
+  static const std::string name;
+
+  [[nodiscard]] shape *clone() const override { return new group(*this); }
 };
 
-}
+}  // namespace libsvg

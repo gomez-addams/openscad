@@ -1,0 +1,41 @@
+#pragma once
+
+#include <cstddef>
+#include <memory>
+
+#include "glview/system-gl.h"
+#include "glview/OpenGLContext.h"
+
+class FBO
+{
+public:
+  FBO(int width, int height, bool useEXT);
+  ~FBO() { destroy(); };
+
+  int width() const { return width_; }
+  int height() const { return height_; }
+  bool isComplete() const { return complete_; }
+
+  bool resize(size_t width, size_t height);
+  GLuint bind();
+  void unbind();
+
+private:
+  void destroy();
+
+  int width_ = 0;
+  int height_ = 0;
+  bool use_ext_ = false;
+  GLuint fbo_id_ = 0;
+  GLuint old_fbo_id_ = 0;
+  GLuint renderbuf_id_ = 0;
+  GLuint depthbuf_id_ = 0;
+  bool complete_ = false;
+};
+
+std::unique_ptr<FBO> createFBO(int width, int height);
+
+inline std::unique_ptr<FBO> createFBO(const OpenGLContext& ctx)
+{
+  return createFBO(ctx.width(), ctx.height());
+}

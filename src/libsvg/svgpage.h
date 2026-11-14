@@ -24,32 +24,37 @@
  */
 #pragma once
 
-#include "shape.h"
+#include <string>
+
+#include "libsvg/shape.h"
+#include "libsvg/util.h"
 
 namespace libsvg {
 
-class svgpage : public shape {
+class svgpage : public shape
+{
 protected:
-    length_t width;
-    length_t height;
-	viewbox_t viewbox;
-	alignment_t alignment;
+  length_t width;
+  length_t height;
+  viewbox_t viewbox;
+  alignment_t alignment;
 
 public:
-    svgpage();
-    ~svgpage() override;
+  svgpage();
 
-    const length_t& get_width() const { return width; }
-    const length_t& get_height() const { return height; }
-	const viewbox_t& get_viewbox() const { return viewbox; }
-	const alignment_t& get_alignment() const { return alignment; }
-    bool is_container() const override { return true; }
-    
-    void set_attrs(attr_map_t& attrs) override;
-    const std::string dump() const override;
-    const std::string& get_name() const override { return svgpage::name; };
-    
-    static const std::string name;
+  [[nodiscard]] const length_t& get_width() const { return width; }
+  [[nodiscard]] const length_t& get_height() const { return height; }
+  [[nodiscard]] const viewbox_t& get_viewbox() const { return viewbox; }
+  [[nodiscard]] const alignment_t& get_alignment() const { return alignment; }
+  [[nodiscard]] bool is_container() const override { return true; }
+
+  void set_attrs(attr_map_t& attrs, void *context) override;
+  [[nodiscard]] const std::string dump() const override;
+  [[nodiscard]] const std::string& get_name() const override { return svgpage::name; }
+
+  static const std::string name;
+
+  [[nodiscard]] shape *clone() const override { return new svgpage(*this); }
 };
 
-}
+}  // namespace libsvg

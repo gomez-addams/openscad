@@ -1,8 +1,8 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 #
 # This is used to verify that all the dependent libraries of a Mac OS X executable
-# are present and that they are backwards compatible with at least 10.9.
+# are present and that they are backwards compatible with at least 10.14.
 # Run with an executable as parameter
 # Will return 0 if the executable an all libraries are OK
 # Returns != 0 and prints some textural description on error
@@ -12,16 +12,24 @@
 # This script lives here:
 # https://github.com/kintel/MacOSX-tools
 #
+# Notes:
+# * On macOS < 10.14, LC_VERSION_MIN_MACOSX is used in binaries to specify minimum supported macOS version.
+#   On macOS >= 10.14, LC_BUILD_VERSION is used instead
+# * We expect bundled dependencies to use @rpath or @executable_path
+# * Non-bundled dependencies must be built into macOS (in /usr/lib or /System/Library)
+# * DYLD_LIBRARY_PATH is currently supported, but it's not a good practice to depend on it
+#
 
 import sys
 import os
 import subprocess
 import re
-from distutils.version import StrictVersion
 
 DEBUG = False
 
 cxxlib = None
+
+macos_version_min = '12.0'
 
 def usage():
     print("Usage: " + sys.argv[0] + " <executable>", sys.stderr)
@@ -36,14 +44,14 @@ def lookup_library(file):
         if os.path.exists(file): found = file
         if DEBUG: print("@rpath resolved: " + str(file))
     if not found:
-        if re.search("\.app/", file):
+        if re.search(r"\.app/", file):
             found = file
             if DEBUG: print("App found: " + str(found))
         elif re.search("@executable_path", file):
             abs = re.sub("^@executable_path", executable_path, file)
             if os.path.exists(abs): found = abs
             if DEBUG: print("Lib in @executable_path found: " + str(found))
-        elif re.search("\.framework/", file):
+        elif re.search(r"\.framework/", file):
             found = os.path.join("/Library/Frameworks", file)
             if DEBUG: print("Framework found: " + str(found))
         else:
@@ -70,7 +78,7 @@ def find_dependencies(file):
         # print(dep)
         # Fail if libstc++ and libc++ was mixed
         global cxxlib
-        match = re.search("lib(std)?c\+\+", dep)
+        match = re.search(r"lib(std)?c\+\+", dep)
         if match:
             if not cxxlib:
                 cxxlib = match.group(0)
@@ -80,28 +88,33 @@ def find_dependencies(file):
                     return None
         dep = re.sub(".*:$", "", dep) # Take away header line
         dep = re.sub("^\t", "", dep) # Remove initial tabs
-        dep = re.sub(" \(.*\)$", "", dep) # Remove trailing parentheses
+        dep = re.sub(r"\s\(.*\)$", "", dep) # Remove trailing parentheses
         if len(dep) > 0 and not re.search("/System/Library", dep) and not re.search("/usr/lib", dep):
             libs.append(dep)
     return libs
+
+def version_larger_than(a,b):
+    return list(map(int, a.split('.'))) > list(map(int, b.split('.')))
 
 def validate_lib(lib):
     p  = subprocess.Popen(["otool", "-l", lib], stdout=subprocess.PIPE, universal_newlines=True)
     output = p.communicate()[0]
     if p.returncode != 0: return False
     # Check deployment target
-    m = re.search("LC_VERSION_MIN_MACOSX.*\n(.*)\n\s+version (.*)", output, re.MULTILINE)
-    if not m:
-        print("Error: LC_VERSION_MIN_MACOSX not found in " + lib)
+    m = re.search(r"LC_VERSION_MIN_MACOSX([^\n]*\n){2}\s+version\s(.*)", output, re.MULTILINE)
+    deploymenttarget = None
+    if m is not None:
+        deploymenttarget = m.group(2)
+    if deploymenttarget is None:
+        m = re.search(r"LC_BUILD_VERSION([^\n]*\n){3}\s+minos\s(.*)", output, re.MULTILINE)
+        if m is not None:
+            deploymenttarget = m.group(2)
+    if deploymenttarget is None:
+        print("Error: Neither LC_VERSION_MIN_MACOSX nor LC_BUILD_VERSION found in " + lib)
         return False
-    deploymenttarget = m.group(2)
-    if StrictVersion(deploymenttarget) > StrictVersion('10.9'):
+    if version_larger_than(deploymenttarget, macos_version_min):
         print("Error: Unsupported deployment target " + m.group(2) + " found: " + lib)
         return False
-# We don't support Snow Leopard anymore
-#    if re.search("LC_DYLD_INFO_ONLY", output):
-#        print("Error: Requires Snow Leopard: " + lib)
-#        return False
 
     # This is a check for a weak symbols from a build made on 10.12 or newer sneaking into a build for an
     # earlier deployment target. The 'mkostemp' symbol tends to be introduced by fontconfig.
@@ -113,18 +126,19 @@ def validate_lib(lib):
         print("Error: Reference to mkostemp() found - only supported on macOS 10.12->")
         return None
 
-    p  = subprocess.Popen(["lipo", lib, "-verify_arch", "x86_64"], stdout=subprocess.PIPE, universal_newlines=True)
-    output = p.communicate()[0]
-    if p.returncode != 0: 
-        print("Error: x86_64 architecture not supported: " + lib)
+    # Check that both x86_64 and arm64 architectures exist
+    p = subprocess.Popen(["lipo", lib, "-verify_arch", "x86_64"], stdout=subprocess.PIPE, universal_newlines=True)
+    p.communicate()[0]
+    if p.returncode != 0:
+        print("Error: x86_64 architecture not found in " + lib)
         return False
 
-# We don't support 32-bit binaries anymore
-#    p  = subprocess.Popen(["lipo", lib, "-verify_arch", "i386"], stdout=subprocess.PIPE, universal_newlines=True)
-#    output = p.communicate()[0]
-#    if p.returncode != 0: 
-#        print("Error: i386 architecture not supported: " + lib)
-#        return False
+    p  = subprocess.Popen(["lipo", lib, "-verify_arch", "arm64"], stdout=subprocess.PIPE, universal_newlines=True)
+    p.communicate()[0]
+    if p.returncode != 0:
+        print("Error: arm64 architecture not found in " + lib)
+        return False
+
     return True
 
 if __name__ == '__main__':
@@ -141,7 +155,7 @@ if __name__ == '__main__':
         print('Error otool -l failed on main executable')
         sys.exit(1)
     # Check deployment target
-    m = re.search("LC_RPATH\n(.*)\n\s+path ([^ ]+)", output, re.MULTILINE)
+    m = re.search(r"LC_RPATH\n(.*)\n\s+path\s([^\s]+)", output, re.MULTILINE)
     lc_rpath = m.group(2)
     if DEBUG: print('Runpath search path: ' + lc_rpath)
 
@@ -157,7 +171,7 @@ if __name__ == '__main__':
         assert(deps)
         for d in deps:
             absfile = lookup_library(d)
-            if absfile == None:
+            if absfile is None:
                 print("Not found: " + d)
                 print("  ..required by " + str(processed[dep]))
                 error = True

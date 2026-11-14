@@ -9,7 +9,7 @@
 #  source ./scripts/setenv-mingw-xbuild.sh 64        # 64 bit build
 #  source ./scripts/setenv-mingw-xbuild.sh 64 shared # 64 bit build, shared libs
 #  source ./scripts/setenv-mingw-xbuild.sh clean     # Clean up exported variables
-#  source ./scripts/setenv-mingw-xbuild.sh qt5       # use qt5 (experimental)
+#  source ./scripts/setenv-mingw-xbuild.sh qt6       # use qt6
 #
 # Prerequisites:
 #
@@ -51,12 +51,10 @@ if [ ! $MXEDIR ]; then
 fi
 
 if [ ! $MXEQTSUBDIR ]; then
-	if [ "`echo $* | grep qt4 `" ]; then
-		# qt4 is just 'qt' in MXE, see http://mxe.cc
-		MXEQTSUBDIR=qt
-	else
-		# default is qt5 see issue #252
-		MXEQTSUBDIR=qt5
+	# default is qt5 see issue #252
+	MXEQTSUBDIR=qt5
+	if [ "`echo $* | grep qt6 `" ]; then
+		MXEQTSUBDIR=qt6
 	fi
 fi
 
@@ -82,7 +80,9 @@ PATH=$MXETARGETDIR/$MXEQTSUBDIR/bin:$PATH
 if [ "`echo $* | grep clean`" ]; then
   BASEDIR=
   MXEDIR=
+  MXE_TARGETS=
   MXETARGETDIR=
+  MXELIBTYPE=
   DEPLOYDIR=
   PATH=$MINGWX_SAVED_ORIGINAL_PATH
   MINGWX_SAVED_ORIGINAL_PATH=
@@ -108,6 +108,7 @@ export MXEQTSUBDIR
 echo OPENSCAD_LIBRARIES: $OPENSCAD_LIBRARIES
 echo BASEDIR: $BASEDIR
 echo MXEDIR: $MXEDIR
+echo MXE_TARGETS: $MXE_TARGETS
 echo MXETARGETDIR: $MXETARGETDIR
 echo MXELIBTYPE: $MXELIBTYPE
 echo DEPLOYDIR: $DEPLOYDIR
@@ -120,6 +121,5 @@ else
 fi
 
 if [ "`echo $PATH | grep anaconda.*bin`" ]; then
-  echo please remove pytho anaconda/bin from your PATH, exit, and rerun this
+  echo please remove python anaconda/bin from your PATH, exit, and rerun this
 fi
-

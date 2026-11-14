@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 
 # test_pretty_print by don bright 2012. Copyright assigned to Marius Kintel and
 # Clifford Wolf 2012. Released under the GPL 2, or later, as described in
@@ -6,40 +6,32 @@
 
 #
 # This program 'pretty prints' the ctest output, including
-# - log files from builddir/Testing/Temporary/ 
+# - log files from builddir/Testing/Temporary/
 # - .png and .txt files from testname-output/*
 #
 # The result is a single html report file with images data-uri encoded
-# into the file. It can be uploaded as a single static file to a web server
-# or the 'test_upload.py' script can be used. 
+# into the file.
 
 
 # Design philosophy
 #
 # 1. parse the data (images, logs) into easy-to-use data structures
-# 2. wikifiy the data 
+# 2. wikifiy the data
 # 3. save the wikified data to disk
 # 4. generate html, including base64 encoding of images
 # 5. save html file
-# 6. upload html to public site and share with others
 
 # todo
 #
 # 1. why is hash differing
 
-from __future__ import print_function
 
-import string, sys, re, os, hashlib, subprocess, time, platform, html, base64
+import pathlib, string, sys, re, os, hashlib, subprocess, time, platform, html, base64
 
+from urllib.error import URLError
+from urllib.request import urlopen
+from urllib.parse import urlencode
 
-try:
-    from urllib.error import URLError
-    from urllib.request import urlopen
-    from urllib.parse import urlencode
-except:
-    from urllib2 import URLError
-    from urllib2 import urlopen
-    from urllib import urlencode
 
 def tryread(filename):
     data = None
@@ -51,7 +43,7 @@ def tryread(filename):
         debug( "couldn't open file: [" + filename + "]" )
         debug( str(type(e))+str(e) )
         if filename==None:
-            # don't write a bunch of extra errors during test output. 
+            # don't write a bunch of extra errors during test output.
             # the reporting of test failure is sufficient to indicate a problem
             pass
     return data
@@ -76,15 +68,15 @@ def ezsearch(pattern, str):
     x = re.search(pattern,str,re.DOTALL|re.MULTILINE)
     if x and len(x.groups())>0: return x.group(1).strip()
     return ''
-    
+
 def read_gitinfo():
-    # won't work if run from outside of branch. 
+    # won't work if run from outside of branch.
     try:
         data = subprocess.Popen(['git', 'remote', '-v'], stdout=subprocess.PIPE).stdout.read().decode('utf-8')
-        origin = ezsearch('^origin *?(.*?)\(fetch.*?$', data)
-        upstream = ezsearch('^upstream *?(.*?)\(fetch.*?$', data)
+        origin = ezsearch(r'^origin *?(.*?)\(fetch.*?$', data)
+        upstream = ezsearch(r'^upstream *?(.*?)\(fetch.*?$', data)
         data = subprocess.Popen(['git', 'branch'], stdout=subprocess.PIPE).stdout.read().decode('utf-8')
-        branch = ezsearch('^\*(.*?)$', data)
+        branch = ezsearch(r'^\*(.*?)$', data)
         out = 'Git branch: ' + branch + ' from origin ' + origin + '\n'
         out += 'Git upstream: ' + upstream + '\n'
     except:
@@ -93,7 +85,7 @@ def read_gitinfo():
 
 def read_sysinfo(filename):
     data = tryread(filename)
-    if not data: 
+    if not data:
         sinfo = platform.sys.platform
         sinfo += '\nsystem cannot create offscreen GL framebuffer object'
         sinfo += '\nsystem cannot create GL based images'
@@ -101,15 +93,15 @@ def read_sysinfo(filename):
         return sinfo, sysid
 
     data = data.decode('utf-8')
-    machine = ezsearch('Machine:(.*?)\n',data)
+    machine = ezsearch(r'Machine:(.*?)\n',data)
     machine = machine.replace(' ','-').replace('/','-')
 
-    osinfo = ezsearch('OS info:(.*?)\n',data)
+    osinfo = ezsearch(r'OS info:(.*?)\n',data)
     osplain = osinfo.split(' ')[0].strip().replace('/','-')
     if 'windows' in osinfo.lower():
         osplain = 'win'
 
-    renderer = ezsearch('GL Renderer:(.*?)\n',data)
+    renderer = ezsearch(r'GL Renderer:(.*?)\n',data)
     tmp = renderer.split(' ')
     tmp = "-".join(tmp[0:min(len(tmp),4)])
     tmp = tmp.split('/')[0]
@@ -139,7 +131,7 @@ class Test:
         self.fulltestlog = log
         self.actualfile_data = None
         self.expectedfile_data = None
-        
+
     def info(self):
         x = 'fullname: ' + self.fullname
         x+= '\nactualfile: ' + self.actualfile
@@ -157,17 +149,17 @@ class Test:
         return x
 
 def parsetest(teststring):
-    patterns = ["Test:(.*?)\n", # fullname
-        "Test time =(.*?) sec\n",
-        "Test time.*?Test (Passed)", # pass/fail
-        "Output:(.*?)<end of output>",
-        'Command:.*?-s" "(.*?)"', # type
-        "^ actual .*?:(.*?)\n",
-        "^ expected .*?:(.*?)\n",
-        'Command:.*?(testdata.*?)"' # scadfile 
+    patterns = [r'Test:(.*?)\n', # fullname
+        r'Test time =(.*?) sec\n',
+        r'Test time.*?Test (Passed)', # pass/fail
+        r'Output:(.*?)<end of output>',
+        r'Command:.*?-s" "(.*?)"', # type
+        r'^ actual .*?:(.*?)\n',
+        r'^ expected .*?:(.*?)\n',
+        r'Command:.*?(tests/data.*?)"' # scadfile
         ]
     hits = list(map(lambda pattern: ezsearch(pattern, teststring), patterns))
-    test = Test(hits[0], hits[1], hits[2]=='Passed', hits[3], hits[4], hits[5], 
+    test = Test(hits[0], hits[1], hits[2]=='Passed', hits[3], hits[4], hits[5],
                 hits[6], hits[7], teststring)
     if len(test.actualfile) > 0:
         test.actualfile_data = tryread(test.actualfile)
@@ -178,9 +170,9 @@ def parsetest(teststring):
 
 def parselog(data):
     text = data.decode('utf-8', 'replace')
-    startdate = ezsearch('Start testing: (.*?)\n', text)
-    enddate = ezsearch('End testing: (.*?)\n', text)
-    pattern = '([0-9]*/[0-9]* Testing:.*?time elapsed.*?\n)'
+    startdate = ezsearch(r'Start testing: (.*?)\n', text)
+    enddate = ezsearch(r'End testing: (.*?)\n', text)
+    pattern = r'([0-9]*/[0-9]* Testing:.*?time elapsed.*?\n)'
     test_chunks = re.findall(pattern,text, re.S)
     tests = map( parsetest, test_chunks )
     tests = sorted(tests, key = lambda t: t.passed)
@@ -211,19 +203,50 @@ def png_encode64(fname, width=512, data=None, alt=''):
     return tag
 
 
+RUN_MARKER_NAME = '.pretty_print_run_marker'
+
+
+def mark_run(builddir):
+    # Touched by CTestCustom.template's CTEST_CUSTOM_PRE_TEST, right before ctest starts running
+    # tests, so findlogfile() can tell "the log this run wrote" from "whichever log is newest".
+    logpath = os.path.join(builddir, 'Testing', 'Temporary')
+    os.makedirs(logpath, exist_ok=True)
+    pathlib.Path(os.path.join(logpath, RUN_MARKER_NAME)).touch()
+
+
 def findlogfile(builddir):
     logpath = os.path.join(builddir, 'Testing', 'Temporary')
-    logfilename = os.path.join(logpath, 'LastTest.log.tmp')
-    if not os.path.isfile(logfilename):
-        logfilename = os.path.join(logpath, 'LastTest.log')
-    if not os.path.isfile(logfilename):
-        print('can\'t find and/or open logfile', logfilename)
+    # ctest may not have flushed LastTest.log by the time this post-test hook runs, in which case
+    # the current run is in LastTest.log.tmp<random> instead, and an interrupted run leaves its
+    # temp file behind forever. Newest-by-mtime picks the right one of those -- but two concurrent
+    # ctest invocations against the same builddir can each leave a fresh-looking file, and mtime
+    # alone can't tell which belongs to *this* invocation. So only consider candidates written at
+    # or after this run's marker; a run with nothing fresher than its own marker fails loudly
+    # instead of silently reporting a stale run's results.
+    candidates = [path for path in pathlib.Path(logpath).glob('LastTest.log*') if path.is_file()]
+    if not candidates:
+        print('can\'t find and/or open logfile in', logpath)
         sys.exit()
-    return logfilename
+
+    marker = pathlib.Path(logpath, RUN_MARKER_NAME)
+    if marker.exists():
+        marker_mtime = marker.stat().st_mtime
+        fresh = [path for path in candidates if path.stat().st_mtime >= marker_mtime]
+        if not fresh:
+            sys.exit(f'no logfile in {logpath} is newer than this run\'s marker -- ctest may '
+                      'have been interrupted before writing one')
+        candidates = fresh
+    else:
+        # Marker missing: the script was run outside the wired-up ctest hook (e.g. by hand during
+        # development), or the build tree predates the marker. Newest-by-mtime is still correct as
+        # long as this is the only invocation touching the builddir.
+        print('warning: no run marker found in', logpath, '-- falling back to newest logfile')
+
+    return str(max(candidates, key=lambda path: path.stat().st_mtime))
 
 # --- Templating ---
-    
-class Templates(object):
+
+class Templates:
     html_template = '''<html>
     <head><title>Test run for {sysid}</title>
     <meta charset="utf-8" />
@@ -237,7 +260,7 @@ class Templates(object):
         <p>
             <b>Result summary</b>:  {numpassed} / {numtests} tests passed ({percent}%)
         </p>
-        
+
         <p>
             <b>System info</b>
         </p>
@@ -286,9 +309,9 @@ class Templates(object):
 
     image_template = '''<table>
     <tbody>
-    <tr><td colspan="2">{test_name}</td></tr>
-    <tr><td> Expected image </td><td> Actual image </td></tr>
-    <tr><td> {expected} </td><td> {actual} </td></tr>
+    <tr><td colspan="3">{test_name}</td></tr>
+    <tr><td> Expected image </td><td> Actual image </td><td> Failure mask </td></tr>
+    <tr><td> {expected} </td><td> {actual} </td><td> {mask} </td></tr>
     </tbody>
     </table>
 
@@ -344,7 +367,8 @@ def to_html(project_name, startdate, tests, enddate, sysinfo, sysid, imgcomparer
 
     templates = Templates()
     for test in report_tests:
-        if test.type in ('txt', 'ast', 'csg', 'term', 'echo', 'stl', '3mf'):
+        if test.type in ('txt', 'ast', 'csg', 'term', 'echo', 'stl', '3mf', 'off', 'obj', 'pov',
+                          'dxf', 'svg', 'json', ''):
             text_test_count += 1
             templates.add('text_template', 'text_tests',
                           test_name=test.fullname,
@@ -358,6 +382,14 @@ def to_html(project_name, startdate, tests, enddate, sysinfo, sysid, imgcomparer
             actual_img = png_encode64(test.actualfile,
                                   data=test.actualfile_data, alt=alttxt)
 
+            split = os.path.splitext(test.actualfile)
+            test.maskfile = f'{split[0]}_mask{split[1]}'
+            test.maskfile_data = tryread(test.maskfile)
+            if not os.path.exists(test.maskfile):
+                alttxt = 'mask missing for ' + test.fullname
+            mask_img = png_encode64(test.maskfile,
+                                  data=test.maskfile_data, alt=alttxt)
+
             if not os.path.exists(test.expectedfile):
                 alttxt = 'no img generated for ' + test.fullname
             expected_img = png_encode64(test.expectedfile,
@@ -367,9 +399,10 @@ def to_html(project_name, startdate, tests, enddate, sysinfo, sysid, imgcomparer
                           test_name=test.fullname,
                           test_log=test.fulltestlog,
                           actual=actual_img,
-                          expected=expected_img)
+                          expected=expected_img,
+                          mask=mask_img)
         else:
-            raise TypeError('Unknown test type %r' % test.type)
+            raise TypeError(f"Unknown test type '{test.type}' in test {test.fullname}")
 
     for mf in sorted(makefiles.keys()):
         mfname = mf.strip().lstrip(os.path.sep)
@@ -398,38 +431,6 @@ def to_html(project_name, startdate, tests, enddate, sysinfo, sysid, imgcomparer
 
 # --- End Templating ---
 
-# --- Web Upload ---
-
-def postify(data):
-    return urlencode(data).encode()
-
-def create_page():
-    data = {
-        'action': 'create',
-        'type': 'html'
-    }
-    try:
-        response = urlopen('http://www.dinkypage.com', data=postify(data))
-    except:
-        return None
-    return response.geturl()
-
-def upload_html(page_url, title, html):
-    data = {
-        'mode': 'editor',
-        'title': title,
-        'html': html,
-        'ajax': '1'
-    }
-    try:
-        response = urlopen(page_url, data=postify(data))
-    except (URLError) as e:
-        print('Upload error: ' + str(e))
-        return False
-    return 'success' in response.read().decode()
-
-# --- End Web Upload ---
-
 debug_test_pp = False
 #debug_test_pp = True
 debugfile = None
@@ -446,12 +447,12 @@ def main():
     global builddir, debug_test_pp
     global maxretry, dry, include_passed
     project_name = 'OpenSCAD'
-    
+
     if bool(os.getenv("TEST_GENERATE")):
         sys.exit(0)
-    
+
     # --- Command Line Parsing ---
-    
+
     if '--debug' in ' '.join(sys.argv):
         debug_test_pp = True
     maxretry = 10
@@ -464,24 +465,18 @@ def main():
     if '--dryrun' in sys.argv:
         dry = True
 
-    suffix = ezsearch('--suffix=(.*?) ', ' '.join(sys.argv) + ' ')
-    builddir = ezsearch('--builddir=(.*?) ', ' '.join(sys.argv) + ' ')
+    suffix = ezsearch(r'--suffix=(.*?) ', ' '.join(sys.argv) + ' ')
+    builddir = ezsearch(r'--builddir=(.*?) ', ' '.join(sys.argv) + ' ')
     if not builddir or not os.path.exists(builddir):
         builddir = os.getcwd()
         print('warning: could not find --builddir, trying to use current dir:', builddir)
     debug('build dir set to ' +  builddir)
 
-    upload = False
-    if '--upload' in sys.argv:
-        upload = True
-        debug('will upload test report')
-
-    # Workaround for old cmake's not being able to pass parameters
-    # to CTEST_CUSTOM_POST_TEST
-    if bool(os.getenv("OPENSCAD_UPLOAD_TESTS")):
-        upload = True
-    
     # --- End Command Line Parsing ---
+
+    if '--mark-run' in sys.argv:
+        mark_run(builddir)
+        return
 
     sysinfo, sysid = read_sysinfo(os.path.join(builddir, 'sysinfo.txt'))
     makefiles = load_makefiles(builddir)
@@ -499,25 +494,15 @@ def main():
     html_filename = os.path.join(builddir, 'Testing', 'Temporary', html_basename)
     debug('saving ' + html_filename + ' ' + str(len(html)) + ' bytes')
     trysave(html_filename, html)
-    print("report saved:\n", html_filename.replace(os.getcwd()+os.path.sep,''))
-
-    failed_tests = [test for test in tests if not test.passed]
-    if upload and failed_tests:
-        build = os.getenv("TRAVIS_BUILD_NUMBER")
-        if build: filename = 'travis-' + build + '_report.html'
-        else: filename = html_basename
-        os.system('scp "%s" "%s:%s"' %
-                  (html_filename, 'openscad@files.openscad.org', 'www/tests/' + filename) )
-        share_url = 'http://files.openscad.org/tests/' + filename;
-        print('html report uploaded:')
-        print(share_url)
-
-#        page_url = create_page()
-#        if upload_html(page_url, title='OpenSCAD test results', html=html):
-#            share_url = page_url.partition('?')[0]
-#            print('html report uploaded at', share_url)
-#        else:
-#            print('could not upload html report')
+    if os.environ.get("CI"):
+        # relative path because this ultimately this file will end up inside a zip archive
+        report_path = html_filename.replace(os.getcwd() + os.path.sep, "")
+        print("report saved:\n", report_path)
+    else:
+        report_path = os.path.abspath(html_filename)
+        report_uri = pathlib.Path(report_path).as_uri()
+        report_link = f"\033]8;;{report_uri}\033\\{report_path}\033]8;;\033\\"
+        print("report saved:\n", report_link)
 
     debug('test_pretty_print complete')
 

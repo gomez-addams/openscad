@@ -1,14 +1,35 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
-PARALLEL=2
-PARALLEL_MAKE=-j"$PARALLEL"
-PARALLEL_CTEST=-j"$PARALLEL"
+PARALLEL_MAKE=-j2  # runners have insufficient memory for -j4
+PARALLEL_CTEST=-j4
+PARALLEL_GCOVR=-j4
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 BUILDDIR=b
 GCOVRDIR=c
-TESTDIR=tests
+
+do_experimental() {
+	echo "do_experimental()"
+	EXPERIMENTAL="-DEXPERIMENTAL=ON"
+}
+
+do_enable_python() {
+	echo "do_enable_python()"
+	PYTHON_DEFINE="-DENABLE_PYTHON=ON"
+}
+
+do_qt5() {
+	echo "do_qt5()"
+	QT="-DUSE_QT6=OFF"
+}
+
+do_qt6() {
+	echo "do_qt6()"
+	QT=""
+}
 
 do_build() {
 	echo "do_build()"
@@ -17,7 +38,7 @@ do_build() {
 	mkdir "$BUILDDIR"
 	(
 		cd "$BUILDDIR"
-		cmake -DCMAKE_BUILD_TYPE=Release -DEXPERIMENTAL=ON -DPROFILE=ON .. && make $PARALLEL_MAKE
+		cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_UNITY_BUILD=OFF -DPROFILE=ON -DUSE_BUILTIN_OPENCSG=1 ${EXPERIMENTAL} ${PYTHON_DEFINE} ${QT} .. && make $PARALLEL_MAKE
 	)
 	if [[ $? != 0 ]]; then
 		echo "Build failure"
@@ -25,17 +46,17 @@ do_build() {
 	fi
 }
 
+do_test_examples() {
+	echo "do_test_examples()"
+	CTEST_ARGS="-C Examples"
+}
+
 do_test() {
 	echo "do_test()"
 
 	(
-		# Use TESTDIR within BUILDDIR
-		cd "$BUILDDIR/$TESTDIR"
-		ctest $PARALLEL_CTEST -E nef3_broken
-		if [[ $? != 0 ]]; then
-			exit 1
-		fi
-		tar -C .gcov -c -f - . | tar -C ../ -x -f -
+		cd "$BUILDDIR"
+		ctest $PARALLEL_CTEST $CTEST_ARGS
 	)
 	if [[ $? != 0 ]]; then
 		echo "Test failure"
@@ -46,21 +67,14 @@ do_test() {
 do_coverage() {
 	echo "do_coverage()"
 
-	case $(gcovr --version | head -n1 | awk '{ print $2 }') in
-	    [4-9].*)
-		PARALLEL_GCOVR=-j"$PARALLEL"
-		;;
-	    *)
-		PARALLEL_GCOVR=
-		;;
-	esac
-
 	rm -rf "$GCOVRDIR"
 	mkdir "$GCOVRDIR"
 	(
 		cd "$BUILDDIR"
 		echo "Generating code coverage report..."
-		gcovr -r .. $PARALLEL_GCOVR --html --html-details -p -o coverage.html
+		# This works so long as the binary was built with -DPROFILE
+		# and you exercised the binary beforehand.
+		uv run --project "$REPO_ROOT/.github/ci/openscad-coverage" gcovr -r ../src CMakeFiles/OpenSCADLibInternal.dir $PARALLEL_GCOVR --html --html-details --sort uncovered-percent -o coverage.html
 		if [[ $? != 0 ]]; then
 			exit 1
 		fi
